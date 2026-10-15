@@ -1,10 +1,12 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
-import { Camera, Check, Flame, Image as ImageIcon, LoaderCircle, Minus, Plus, Search, Sparkles, Trash2, Upload, X } from 'lucide-react';
-import { getFood, searchFoods } from '@/lib/foods';
-import { foodNutrients, sumNutrients } from '@/lib/nutrition';
+import { Camera, Check, Flame, LoaderCircle, Minus, Plus, Search, Trash2, Upload, X } from 'lucide-react';
+import { searchFoods } from '@/lib/foods';
+import { getMealItemFood } from '@/lib/meal-items';
+import { itemNutrients, sumNutrients } from '@/lib/nutrition';
 import type { Food, Locale, Meal, MealItem, MealType } from '@/lib/types';
+import PhotoAnalysisPanel from './photo-analysis-panel';
 
 type MealEditorProps = {
   locale: Locale;
@@ -26,7 +28,7 @@ const categoryNames = {
   ar: { all: 'كل الأطعمة', protein: 'البروتين', grains: 'الحبوب', fruit: 'الفواكه', vegetables: 'الخضروات', dairy: 'الألبان', fats: 'الدهون والمكسرات', dishes: 'الأطباق' },
 };
 
-/** Photos are local attachments. Nutrition always comes from explicitly selected foods. */
+/** Prepare a local attachment; sending it for analysis is a separate, explicit action. */
 async function preparePhoto(file: File): Promise<string> {
   const url = URL.createObjectURL(file);
   try {
@@ -74,7 +76,6 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
   const ar = locale === 'ar';
   const t = (english: string, arabic: string) => ar ? arabic : english;
   const titleId = useId();
-  const noteId = useId();
   const searchId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -86,6 +87,8 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
   const [type, setType] = useState<MealType>(editing?.type ?? initialType);
   const [name, setName] = useState(editing?.name ?? '');
   const [items, setItems] = useState<MealItem[]>(() => editing?.items.map(item => ({ ...item })) ?? []);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<Food['category'] | 'all'>('all');
   const [tab, setTab] = useState<'foods' | 'photo'>('foods');
@@ -95,7 +98,7 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
   const [photoError, setPhotoError] = useState('');
   const [added, setAdded] = useState('');
   const visibleFoods = searchFoods(query, category);
-  const totals = sumNutrients(items.filter(item => getFood(item.foodId) && Number.isFinite(item.grams) && item.grams > 0 && item.grams <= 5000).map(item => foodNutrients(item.foodId, item.grams)));
+  const totals = sumNutrients(items.filter(item => getMealItemFood(item) && Number.isFinite(item.grams) && item.grams >= 0.1 && item.grams <= 5000).map(itemNutrients));
   const number = (value: number) => Math.round(value).toLocaleString(ar ? 'ar' : 'en');
 
   useEffect(() => {
@@ -110,7 +113,7 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
         onCloseRef.current();
       }
       if (event.key !== 'Tab') return;
-      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex="0"]') ?? []).filter(element => element.getClientRects().length > 0);
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex="0"]') ?? []).filter(element => element.getClientRects().length > 0);
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (!first) {
@@ -134,9 +137,28 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
   }, []);
 
   function addFood(food: Food) {
-    setItems(previous => [...previous, { id: crypto.randomUUID(), foodId: food.id, grams: food.servingGrams }]);
+    if (itemsRef.current.length >= 50) {
+      setError(t('A meal can contain up to 50 foods.', 'يمكن أن تحتوي الوجبة على ٥٠ طعاماً كحد أقصى.'));
+      return;
+    }
+    const nextItems = [...itemsRef.current, { id: crypto.randomUUID(), foodId: food.id, grams: food.servingGrams }];
+    itemsRef.current = nextItems;
+    setItems(nextItems);
     setError('');
     setAdded(t(`${food.name} added to your meal.`, `تمت إضافة ${food.nameAr} إلى وجبتك.`));
+  }
+
+  function addReviewedFoods(reviewedItems: MealItem[]): boolean {
+    if (itemsRef.current.length + reviewedItems.length > 50) {
+      setError(t('A meal can contain up to 50 foods. Remove a food before adding more.', 'يمكن أن تحتوي الوجبة على ٥٠ طعاماً كحد أقصى. احذف طعاماً قبل إضافة المزيد.'));
+      return false;
+    }
+    const nextItems = [...itemsRef.current, ...reviewedItems];
+    itemsRef.current = nextItems;
+    setItems(nextItems);
+    setError('');
+    setAdded(t('Reviewed food estimates added to your plate.', 'تمت إضافة تقديرات الطعام بعد مراجعتها إلى وجبتك.'));
+    return true;
   }
 
   function updateGrams(id: string, grams: number) {
@@ -175,7 +197,7 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
       setTab('foods');
       return;
     }
-    if (items.some(item => !getFood(item.foodId) || !Number.isFinite(item.grams) || item.grams < 0.1 || item.grams > 5000)) {
+    if (items.length > 50 || items.some(item => !getMealItemFood(item) || !Number.isFinite(item.grams) || item.grams < 0.1 || item.grams > 5000)) {
       setError(t('Enter a portion between 0.1 and 5,000 grams for every food.', 'أدخل كمية بين ٠٫١ و٥٬٠٠٠ غرام لكل طعام.'));
       return;
     }
@@ -252,7 +274,7 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
               {photo ? <div className="relative overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--canvas)]"><img src={photo} alt={t('Your uploaded meal photo', 'صورة وجبتك المرفوعة')} className="mx-auto h-48 w-full object-contain" /><button type="button" aria-label={t('Remove food photo', 'إزالة صورة الطعام')} disabled={busy} onClick={() => setPhoto(undefined)} className="absolute end-3 top-3 rounded-full bg-[var(--surface)] p-2 text-[var(--ink)] shadow-sm"><Trash2 size={17} /></button><button type="button" disabled={busy} onClick={() => uploadRef.current?.click()} className="w-full border-t border-[var(--border)] py-2.5 text-sm font-semibold text-[var(--green)]">{t('Choose another photo', 'اختر صورة أخرى')}</button></div> : <button type="button" disabled={busy} onClick={() => uploadRef.current?.click()} className="flex w-full flex-col items-center gap-2 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--canvas)] px-5 py-8 transition hover:border-[var(--green)] disabled:opacity-60"><span className="mb-1 rounded-2xl bg-[var(--soft)] p-3 text-[var(--green)]">{busy ? <LoaderCircle className="animate-spin" size={26} /> : <Upload size={26} />}</span><span className="font-semibold">{busy ? t('Preparing your photo…', 'جارٍ تجهيز الصورة…') : t('Upload a food photo', 'حمّل صورة طعامك')}</span><span className="text-xs text-[var(--muted)]">{t('JPG, PNG or WebP · up to 5 MB', 'JPG أو PNG أو WebP · حتى ٥ ميغابايت')}</span></button>}
               {busy && photo && <p role="status" className="mt-2 text-sm text-[var(--muted)]">{t('Preparing your photo…', 'جارٍ تجهيز الصورة…')}</p>}
               {photoError && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{photoError}</p>}
-              <div className="mt-4 flex gap-3 rounded-xl border border-[var(--border)] bg-[var(--soft)] p-4"><Sparkles className="mt-0.5 shrink-0 text-[var(--green)]" size={19} /><div><p id={noteId} className="text-sm font-semibold">{t('Photo analysis isn’t available yet.', 'تحليل الصور غير متاح حالياً.')}</p><p className="mt-1 text-sm leading-relaxed text-[var(--muted)]">{t('Add foods from search to calculate nutrition. Photos are optional attachments saved only on this device.', 'أضف الأطعمة من البحث لحساب القيم الغذائية. الصور مرفقات اختيارية تُحفظ على هذا الجهاز فقط.')}</p><button type="button" disabled aria-describedby={noteId} className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--muted)] opacity-65"><ImageIcon size={14} />{t('Analyze photo · coming later', 'تحليل الصورة · لاحقاً')}</button></div></div>
+              <PhotoAnalysisPanel locale={locale} photo={photo} preparing={busy} remainingSlots={Math.max(0, 50 - items.length)} onAdd={addReviewedFoods} />
             </div>
           )}
 
@@ -260,14 +282,14 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
           <div className="mt-3 space-y-3">
             {!items.length && <div className="rounded-2xl bg-[var(--canvas)] px-5 py-6 text-center text-sm text-[var(--muted)]">{t('Your plate is empty. Find a food above to get started.', 'وجبتك فارغة. ابحث عن طعام أعلاه للبدء.')}</div>}
             {items.map(item => {
-              const food = getFood(item.foodId);
+              const food = getMealItemFood(item);
               if (!food) return null;
-              const nutrition = Number.isFinite(item.grams) && item.grams > 0 && item.grams <= 5000 ? foodNutrients(item.foodId, item.grams) : null;
+              const nutrition = Number.isFinite(item.grams) && item.grams >= 0.1 && item.grams <= 5000 ? itemNutrients(item) : null;
               return <div key={item.id} className="flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--border)] px-3 py-3 sm:px-4">
-                <span className="text-2xl" aria-hidden="true">{food.emoji}</span><div className="min-w-[100px] flex-1"><p className="text-sm font-semibold">{ar ? food.nameAr : food.name}</p><p className="mt-0.5 text-xs text-[var(--muted)]">{number(nutrition?.calories ?? 0)} {t('kcal', 'سعرة')} · {t('for this portion', 'لهذه الكمية')}</p></div>
+                <span className="text-2xl" aria-hidden="true">{food.emoji}</span><div className="min-w-[100px] flex-1"><p className="text-sm font-semibold">{ar ? food.nameAr : food.name}</p>{item.estimatedFood && <p className="mt-0.5 text-xs font-medium text-[var(--green)]">{t('AI estimate · reviewed', 'تقدير بالذكاء الاصطناعي · تمت مراجعته')}</p>}<p className="mt-0.5 text-xs text-[var(--muted)]">{number(nutrition?.calories ?? 0)} {t('kcal', 'سعرة')} · {t('for this portion', 'لهذه الكمية')}</p></div>
                 <div className="flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--canvas)] p-1">
                   <button type="button" aria-label={t(`Decrease ${food.name} portion`, `تقليل كمية ${food.nameAr}`)} onClick={() => updateGrams(item.id, Math.max(1, item.grams - 10))} className="rounded-md p-1.5 text-[var(--muted)] hover:bg-[var(--soft)]"><Minus size={14} /></button>
-                  <label className="flex items-center gap-1"><span className="sr-only">{t(`${food.name} portion in grams`, `كمية ${food.nameAr} بالغرام`)}</span><input type="number" inputMode="decimal" min="0.1" max="5000" step="0.1" value={item.grams || ''} onChange={event => updateGrams(item.id, event.target.value === '' ? 0 : Number(event.target.value))} className="w-14 bg-transparent text-center text-sm font-semibold outline-none focus:ring-2 focus:ring-[var(--green)]" /><span className="text-xs text-[var(--muted)]">{t('g', 'غ')}</span></label>
+                  <label className="flex items-center gap-1"><span className="sr-only">{t(`${food.name} portion in grams`, `كمية ${food.nameAr} بالغرام`)}</span><input type="number" aria-label={t(`${food.name} portion in grams`, `كمية ${food.nameAr} بالغرام`)} inputMode="decimal" min="0.1" max="5000" step="0.1" value={item.grams || ''} onChange={event => updateGrams(item.id, event.target.value === '' ? 0 : Number(event.target.value))} className="w-14 bg-transparent text-center text-sm font-semibold outline-none focus:ring-2 focus:ring-[var(--green)]" /><span className="text-xs text-[var(--muted)]">{t('g', 'غ')}</span></label>
                   <button type="button" aria-label={t(`Increase ${food.name} portion`, `زيادة كمية ${food.nameAr}`)} onClick={() => updateGrams(item.id, Math.min(5000, item.grams + 10))} className="rounded-md p-1.5 text-[var(--muted)] hover:bg-[var(--soft)]"><Plus size={14} /></button>
                 </div>
                 <button type="button" aria-label={t(`Remove ${food.name}`, `إزالة ${food.nameAr}`)} onClick={() => { setItems(previous => previous.filter(value => value.id !== item.id)); setError(''); }} className="rounded-lg p-2 text-[var(--muted)] transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"><Trash2 size={15} /></button>

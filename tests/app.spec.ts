@@ -79,7 +79,7 @@ test('starts empty without keys, remote food services, or fabricated nutrition',
   await expect(page.getByText('Your progress starts with your first meal. Days without entries show 0 logged.', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Sample • Oats & yogurt', exact: true })).toHaveCount(0);
   await navigate(page, 'My settings');
-  await expect(page.getByText('No account. No keys. No food API calls. Your journal lives in this browser, and you control the backup.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Your journal stays in this browser. Only photos you choose to analyze and their descriptions are sent to OpenAI.', { exact: true })).toBeVisible();
   await expect(page.getByText(/NUTRITION_AI_KEY/)).toHaveCount(0);
   expect(errors).toEqual([]);
   expect(remoteRequests).toEqual([]);
@@ -189,18 +189,20 @@ test('sample week is explicit, marked, charted and selectable', async ({ page })
   await expect(page.getByText('SAMPLE', { exact: true })).toHaveCount(4);
 });
 
-test('valid food photo uploads locally and never invents analysis or nutrition', async ({ page }) => {
+test('photo attachments remain local and manual food tracking works without an AI key', async ({ page }) => {
   const apiRequests: string[] = [];
-  page.on('request', (request) => { if (new URL(request.url()).pathname.startsWith('/api/')) apiRequests.push(request.url()); });
+  await page.route('**/api/food-analysis', route => route.fulfill({ json: { available: false, provider: 'openai' } }));
+  page.on('request', (request) => { if (request.method() === 'POST' && new URL(request.url()).pathname.startsWith('/api/')) apiRequests.push(request.url()); });
   await openApp(page);
   await page.getByRole('button', { name: 'Add Breakfast', exact: true }).click();
   const editor = page.getByRole('dialog', { name: 'Add a meal', exact: true });
   await editor.getByLabel('Meal name (optional)', { exact: true }).fill('Photo and manual banana');
   await editor.getByRole('tab', { name: 'Food photo', exact: true }).click();
-  await expect(editor.getByRole('button', { name: 'Analyze photo · coming later', exact: true })).toBeDisabled();
+  await expect(editor.getByText('Photo analysis is not configured on the server. You can still add foods manually.', { exact: true })).toBeVisible();
+  await expect(editor.getByRole('button', { name: 'Analyze photo', exact: true })).toBeDisabled();
   await editor.getByLabel('Upload a food photo', { exact: true }).setInputFiles({ name: 'real-small-image.png', mimeType: 'image/png', buffer: smallPng });
   await expect(editor.getByRole('img', { name: 'Your uploaded meal photo', exact: true })).toBeVisible();
-  await expect(editor.getByText('Photo analysis isn’t available yet.', { exact: true })).toBeVisible();
+  await expect(editor.getByRole('button', { name: 'Analyze photo', exact: true })).toBeDisabled();
   await expect(editor.getByText('Your plate is empty. Find a food above to get started.', { exact: true })).toBeVisible();
   await editor.getByRole('button', { name: 'Save meal', exact: true }).click();
   await expect(editor.getByRole('alert')).toHaveText('Add at least one food to calculate and save your meal.');
@@ -209,13 +211,13 @@ test('valid food photo uploads locally and never invents analysis or nutrition',
   await editor.getByLabel('Banana portion in grams').fill('100');
   await editor.getByRole('button', { name: 'Save meal', exact: true }).click();
   await expectDailyTotals(page, 89, 1.1, 22.8, 0.3);
-  await expect(page.getByRole('img', { name: 'Attached meal photo, not analyzed', exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Attached meal photo', exact: true })).toBeVisible();
   const state = await storedState(page);
   expect(state.meals[0].items).toHaveLength(1);
   expect(state.meals[0].photo).toMatch(/^data:image\/jpeg;base64,/);
   expect(apiRequests).toEqual([]);
   await page.reload();
-  await expect(page.getByRole('img', { name: 'Attached meal photo, not analyzed', exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Attached meal photo', exact: true })).toBeVisible();
   await expectDailyTotals(page, 89, 1.1, 22.8, 0.3);
 });
 

@@ -1,5 +1,6 @@
 import { getFood } from './foods';
-import type { Goals, Meal, Nutrients, NutritionPlan, Profile } from './types';
+import { getMealItemFood } from './meal-items';
+import type { Goals, Meal, MealItem, Nutrients, NutritionPlan, Profile } from './types';
 
 export const DEFAULT_GOALS: Goals = { calories: 2200, protein: 150, carbs: 250, fat: 65, waterMl: 2500 };
 const ZERO: Nutrients = { calories: 0, protein: 0, carbs: 0, fat: 0 };
@@ -21,7 +22,20 @@ export function sumNutrients(list: Nutrients[]): Nutrients {
 }
 
 export function mealNutrients(meal: Meal): Nutrients {
-  return sumNutrients(meal.items.map((item) => foodNutrients(item.foodId, item.grams)));
+  return sumNutrients(meal.items.map(itemNutrients));
+}
+
+export function itemNutrients(item: MealItem): Nutrients {
+  const food = getMealItemFood(item);
+  if (!food) throw new Error('Food is not in the local database or its AI estimate is invalid.');
+  const minimum = item.foodId === 'ai-estimate' ? 0.1 : Number.MIN_VALUE;
+  if (!Number.isFinite(item.grams) || item.grams < minimum || item.grams > 5000) {
+    throw new Error(`Portion must be between ${minimum} and 5,000 grams.`);
+  }
+  return { calories: food.per100g.calories * item.grams / 100,
+    protein: food.per100g.protein * item.grams / 100,
+    carbs: food.per100g.carbs * item.grams / 100,
+    fat: food.per100g.fat * item.grams / 100 };
 }
 
 export function dailyNutrients(meals: Meal[], date: string): Nutrients {

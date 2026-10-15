@@ -1,5 +1,6 @@
 import { isDateKey, shiftDate } from './dates';
 import { getFood } from './foods';
+import { validateEstimatedFood } from './meal-items';
 import { DEFAULT_GOALS, calculatePlan } from './nutrition';
 import type { Goals, LocalState, Meal, MealItem, Profile, WeightEntry } from './types';
 
@@ -72,6 +73,11 @@ function readMeal(value: unknown): Meal {
   const items: MealItem[] = array(input.items, 'Meal items', 50).map((entry) => {
     const item = record(entry, 'Meal item');
     const foodId = text(item.foodId, 'Food identifier', 128, 1);
+    if (foodId === 'ai-estimate') {
+      return { id: text(item.id, 'Item identifier', 128, 1), foodId,
+        grams: number(item.grams, 'Portion in grams', 0.1, 5000), estimatedFood: validateEstimatedFood(item.estimatedFood) };
+    }
+    if (item.estimatedFood !== undefined) throw new Error('A local food cannot contain an AI estimate.');
     if (!getFood(foodId)) throw new Error('A saved food is not in the local database.');
     return { id: text(item.id, 'Item identifier', 128, 1), foodId,
       grams: number(item.grams, 'Portion in grams', Number.MIN_VALUE, 5000) };
