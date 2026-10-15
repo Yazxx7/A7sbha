@@ -7,7 +7,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'A7sbha — A little balance, every day',
-  description: 'Track calories, protein, carbs and fats with Arabic and English food search, a local journal, and optional AI food photo estimates you can review.',
+  description: 'Track calories, protein, carbs and fats with Arabic and English food search, a local journal, and optional AI food photo and description estimates you can review.',
   icons: { icon: '/favicon.svg' },
 };
 export default function RootLayout({ children }: { children: React.ReactNode }) {

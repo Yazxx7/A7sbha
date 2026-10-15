@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
-import { Camera, Check, Flame, LoaderCircle, Minus, Plus, Search, Trash2, Upload, X } from 'lucide-react';
+import { Camera, Check, Flame, LoaderCircle, Minus, Plus, Search, Text, Trash2, Upload, X } from 'lucide-react';
 import { searchFoods } from '@/lib/foods';
 import { getMealItemFood } from '@/lib/meal-items';
 import { itemNutrients, sumNutrients } from '@/lib/nutrition';
@@ -91,11 +91,12 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
   itemsRef.current = items;
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<Food['category'] | 'all'>('all');
-  const [tab, setTab] = useState<'foods' | 'photo'>('foods');
+  const [tab, setTab] = useState<'foods' | 'photo' | 'description'>('foods');
   const [photo, setPhoto] = useState<string | undefined>(editing?.photo);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [photoError, setPhotoError] = useState('');
+  const [analysisRetryAfterUntil, setAnalysisRetryAfterUntil] = useState(0);
   const [added, setAdded] = useState('');
   const visibleFoods = searchFoods(query, category);
   const totals = sumNutrients(items.filter(item => getMealItemFood(item) && Number.isFinite(item.grams) && item.grams >= 0.1 && item.grams <= 5000).map(itemNutrients));
@@ -238,9 +239,10 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
             </label>
           </div>
 
-          <div className="mt-6 flex gap-2 border-b border-[var(--border)]" role="tablist" aria-label={t('Add food options', 'خيارات إضافة الطعام')}>
-            <button type="button" role="tab" id={`${titleId}-foods-tab`} aria-selected={tab === 'foods'} aria-controls={`${titleId}-foods`} onClick={() => setTab('foods')} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-semibold transition ${tab === 'foods' ? 'border-[var(--green)] text-[var(--green)]' : 'border-transparent text-[var(--muted)] hover:text-[var(--ink)]'}`}><Search size={16} />{t('Search foods', 'ابحث عن طعام')}</button>
-            <button type="button" role="tab" id={`${titleId}-photo-tab`} aria-selected={tab === 'photo'} aria-controls={`${titleId}-photo`} onClick={() => setTab('photo')} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-semibold transition ${tab === 'photo' ? 'border-[var(--green)] text-[var(--green)]' : 'border-transparent text-[var(--muted)] hover:text-[var(--ink)]'}`}><Camera size={16} />{t('Food photo', 'صورة الطعام')}{photo && <Check size={14} />}</button>
+          <div className="mt-6 flex gap-1 overflow-x-auto border-b border-[var(--border)]" role="tablist" aria-label={t('Add food options', 'خيارات إضافة الطعام')}>
+            <button type="button" role="tab" id={`${titleId}-foods-tab`} aria-selected={tab === 'foods'} aria-controls={`${titleId}-foods`} onClick={() => setTab('foods')} className={`flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm font-semibold transition ${tab === 'foods' ? 'border-[var(--green)] text-[var(--green)]' : 'border-transparent text-[var(--muted)] hover:text-[var(--ink)]'}`}><Search size={16} />{t('Search foods', 'ابحث عن طعام')}</button>
+            <button type="button" role="tab" id={`${titleId}-photo-tab`} aria-selected={tab === 'photo'} aria-controls={`${titleId}-photo`} onClick={() => setTab('photo')} className={`flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm font-semibold transition ${tab === 'photo' ? 'border-[var(--green)] text-[var(--green)]' : 'border-transparent text-[var(--muted)] hover:text-[var(--ink)]'}`}><Camera size={16} />{t('Food photo', 'صورة الطعام')}{photo && <Check size={14} />}</button>
+            <button type="button" role="tab" id={`${titleId}-description-tab`} aria-selected={tab === 'description'} aria-controls={`${titleId}-description`} onClick={() => setTab('description')} className={`flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm font-semibold transition ${tab === 'description' ? 'border-[var(--green)] text-[var(--green)]' : 'border-transparent text-[var(--muted)] hover:text-[var(--ink)]'}`}><Text size={16} />{t('Meal description', 'وصف الوجبة')}</button>
           </div>
 
           {tab === 'foods' ? (
@@ -268,13 +270,17 @@ export default function MealEditor({ locale, date, initialType = 'breakfast', ed
               <p className="mt-2 text-xs text-[var(--muted)]">{t('Sample nutrition data. Values vary by brand and preparation; adjust portions in grams below.', 'بيانات غذائية نموذجية. تختلف القيم حسب العلامة التجارية وطريقة التحضير؛ عدّل الكميات بالغرام أدناه.')}</p>
               <p role="status" aria-live="polite" className="sr-only">{added}</p>
             </div>
-          ) : (
+          ) : tab === 'photo' ? (
             <div role="tabpanel" id={`${titleId}-photo`} aria-labelledby={`${titleId}-photo-tab`} className="pt-5">
               <input ref={uploadRef} type="file" accept="image/jpeg,image/png,image/webp" aria-label={t('Upload a food photo', 'تحميل صورة الطعام')} className="hidden" disabled={busy} onChange={event => { void uploadPhoto(event.target.files?.[0]); event.target.value = ''; }} />
               {photo ? <div className="relative overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--canvas)]"><img src={photo} alt={t('Your uploaded meal photo', 'صورة وجبتك المرفوعة')} className="mx-auto h-48 w-full object-contain" /><button type="button" aria-label={t('Remove food photo', 'إزالة صورة الطعام')} disabled={busy} onClick={() => setPhoto(undefined)} className="absolute end-3 top-3 rounded-full bg-[var(--surface)] p-2 text-[var(--ink)] shadow-sm"><Trash2 size={17} /></button><button type="button" disabled={busy} onClick={() => uploadRef.current?.click()} className="w-full border-t border-[var(--border)] py-2.5 text-sm font-semibold text-[var(--green)]">{t('Choose another photo', 'اختر صورة أخرى')}</button></div> : <button type="button" disabled={busy} onClick={() => uploadRef.current?.click()} className="flex w-full flex-col items-center gap-2 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--canvas)] px-5 py-8 transition hover:border-[var(--green)] disabled:opacity-60"><span className="mb-1 rounded-2xl bg-[var(--soft)] p-3 text-[var(--green)]">{busy ? <LoaderCircle className="animate-spin" size={26} /> : <Upload size={26} />}</span><span className="font-semibold">{busy ? t('Preparing your photo…', 'جارٍ تجهيز الصورة…') : t('Upload a food photo', 'حمّل صورة طعامك')}</span><span className="text-xs text-[var(--muted)]">{t('JPG, PNG or WebP · up to 5 MB', 'JPG أو PNG أو WebP · حتى ٥ ميغابايت')}</span></button>}
               {busy && photo && <p role="status" className="mt-2 text-sm text-[var(--muted)]">{t('Preparing your photo…', 'جارٍ تجهيز الصورة…')}</p>}
               {photoError && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{photoError}</p>}
-              <PhotoAnalysisPanel locale={locale} photo={photo} preparing={busy} remainingSlots={Math.max(0, 50 - items.length)} onAdd={addReviewedFoods} />
+              <PhotoAnalysisPanel key="photo" mode="photo" locale={locale} photo={photo} preparing={busy} remainingSlots={Math.max(0, 50 - items.length)} retryAfterUntil={analysisRetryAfterUntil} onRetryAfter={setAnalysisRetryAfterUntil} onAdd={addReviewedFoods} />
+            </div>
+          ) : (
+            <div role="tabpanel" id={`${titleId}-description`} aria-labelledby={`${titleId}-description-tab`} className="pt-1">
+              <PhotoAnalysisPanel key="description" mode="description" locale={locale} preparing={false} remainingSlots={Math.max(0, 50 - items.length)} retryAfterUntil={analysisRetryAfterUntil} onRetryAfter={setAnalysisRetryAfterUntil} onAdd={addReviewedFoods} />
             </div>
           )}
 

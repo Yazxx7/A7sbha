@@ -2,14 +2,17 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import { Check, LoaderCircle, Sparkles, Trash2 } from 'lucide-react';
-import { apiPhotoAnalyzer, getPhotoAnalysisAvailability, photoDataUrlToFile, type AnalyzedFood } from '@/lib/analysis';
+import { apiFoodAnalyzer, getPhotoAnalysisAvailability, photoDataUrlToFile, type AnalyzedFood, type FoodAnalysisMode } from '@/lib/analysis';
 import type { Locale, MealItem, Nutrients } from '@/lib/types';
 
 type Props = {
   locale: Locale;
+  mode: FoodAnalysisMode;
   photo?: string;
   preparing: boolean;
   remainingSlots: number;
+  retryAfterUntil: number;
+  onRetryAfter: (until: number) => void;
   onAdd: (items: MealItem[]) => boolean;
 };
 type ReviewFood = AnalyzedFood & { reviewId: string };
@@ -22,9 +25,10 @@ function isValidFood(food: ReviewFood): boolean {
     && nutrientKeys.every(key => Number.isFinite(food.per100g[key]) && food.per100g[key] >= 0 && food.per100g[key] <= (key === 'calories' ? 1000 : 100));
 }
 
-/** The image stays in the browser until the user explicitly requests analysis. */
-export default function PhotoAnalysisPanel({ locale, photo, preparing, remainingSlots, onAdd }: Props) {
+/** Food content stays in the browser until the user explicitly requests analysis. */
+export default function PhotoAnalysisPanel({ locale, mode, photo, preparing, remainingSlots, retryAfterUntil, onRetryAfter, onAdd }: Props) {
   const ar = locale === 'ar';
+  const descriptionMode = mode === 'description';
   const t = (english: string, arabic: string) => ar ? arabic : english;
   const descriptionId = useId();
   const disclosureId = useId();
@@ -35,12 +39,15 @@ export default function PhotoAnalysisPanel({ locale, photo, preparing, remaining
   const [foods, setFoods] = useState<ReviewFood[] | null>(null);
   const [hadSuggestions, setHadSuggestions] = useState(false);
   const [message, setMessage] = useState('');
+  const [clarification, setClarification] = useState('');
+  const [now, setNow] = useState(() => Date.now());
+  const [estimateNote, setEstimateNote] = useState('');
   const [added, setAdded] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
   const requestVersion = useRef(0);
   const appendRef = useRef(false);
-  const latestPhoto = useRef(photo);
-  latestPhoto.current = photo;
+  const latestInput = useRef({ mode, photo, description, preparing, locale });
+  latestInput.current = { mode, photo, description, preparing, locale };
 
   function cancelAnalysis() {
     requestRef.current?.abort();
@@ -60,15 +67,28 @@ export default function PhotoAnalysisPanel({ locale, photo, preparing, remaining
   }, [availabilityAttempt]);
 
   useEffect(() => {
+    setNow(Date.now());
+    if (retryAfterUntil <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= retryAfterUntil) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [retryAfterUntil]);
+
+  useEffect(() => {
     cancelAnalysis();
     setAnalyzing(false);
     setFoods(null);
     setHadSuggestions(false);
     setMessage('');
+    setClarification('');
+    setEstimateNote('');
     setAdded(false);
     appendRef.current = false;
     return cancelAnalysis;
-  }, [photo, preparing]);
+  }, [mode, photo, preparing, locale]);
 
   function changeDescription(value: string) {
     cancelAnalysis();
@@ -77,40 +97,56 @@ export default function PhotoAnalysisPanel({ locale, photo, preparing, remaining
     setFoods(null);
     setHadSuggestions(false);
     setMessage('');
+    setClarification('');
+    setEstimateNote('');
     setAdded(false);
     appendRef.current = false;
   }
 
   async function analyze() {
-    if (!photo || preparing || analyzing || availability !== 'available') return;
+    if ((descriptionMode ? !description.trim() : !photo) || preparing || analyzing || requestRef.current || availability !== 'available' || retryAfterUntil > Date.now()) return;
     cancelAnalysis();
     const controller = new AbortController();
     requestRef.current = controller;
     const version = requestVersion.current;
-    const analyzedPhoto = photo;
+    const analyzedInput = { mode, photo, description, preparing, locale };
+    const current = () => !controller.signal.aborted && version === requestVersion.current
+      && analyzedInput.mode === latestInput.current.mode && analyzedInput.photo === latestInput.current.photo
+      && analyzedInput.description === latestInput.current.description && analyzedInput.preparing === latestInput.current.preparing
+      && analyzedInput.locale === latestInput.current.locale;
     setAnalyzing(true);
     setFoods(null);
     setHadSuggestions(false);
     setMessage('');
+    setClarification('');
+    setEstimateNote('');
     setAdded(false);
     appendRef.current = false;
     try {
-      const result = await apiPhotoAnalyzer.analyze({ file: photoDataUrlToFile(photo), description: description.trim() || undefined, locale, signal: controller.signal });
-      if (controller.signal.aborted || version !== requestVersion.current || analyzedPhoto !== latestPhoto.current) return;
+      const result = await apiFoodAnalyzer.analyze(descriptionMode
+        ? { mode: 'description', description: description.trim(), locale, signal: controller.signal }
+        : { mode: 'photo', file: photoDataUrlToFile(photo!), description: description.trim() || undefined, locale, signal: controller.signal });
+      if (!current()) return;
       if (result.status === 'unavailable') {
         setAvailability('unavailable');
       } else if (result.status === 'error') {
-        setMessage(result.message || t('Photo analysis failed. Please try again or add foods manually.', 'تعذر تحليل الصورة. حاول مجدداً أو أضف الأطعمة يدوياً.'));
+        setMessage(result.message || t('Food analysis failed. Please try again or add foods manually.', 'تعذر تحليل الطعام. حاول مجدداً أو أضف الأطعمة يدوياً.'));
+        if (result.retryable !== false && result.retryAfterSeconds && result.retryAfterSeconds > 0) {
+          onRetryAfter(Date.now() + result.retryAfterSeconds * 1000);
+        }
+      } else if (result.status === 'clarification') {
+        setClarification(result.message);
       } else {
+        setEstimateNote(result.message);
         setFoods(result.foods.map(food => ({ ...food, per100g: { ...food.per100g }, reviewId: crypto.randomUUID() })));
         setHadSuggestions(result.foods.length > 0);
       }
     } catch {
-      if (!controller.signal.aborted && version === requestVersion.current && analyzedPhoto === latestPhoto.current) {
-        setMessage(t('Could not connect to photo analysis. Please try again or add foods manually.', 'تعذر الاتصال بخدمة تحليل الصور. حاول مجدداً أو أضف الأطعمة يدوياً.'));
+      if (current()) {
+        setMessage(t('Could not connect to food analysis. Please try again or add foods manually.', 'تعذر الاتصال بخدمة تحليل الطعام. حاول مجدداً أو أضف الأطعمة يدوياً.'));
       }
     } finally {
-      if (!controller.signal.aborted && version === requestVersion.current && analyzedPhoto === latestPhoto.current) {
+      if (current()) {
         setAnalyzing(false);
         requestRef.current = null;
       }
@@ -143,30 +179,46 @@ export default function PhotoAnalysisPanel({ locale, photo, preparing, remaining
   };
   const invalidReview = Boolean(foods?.some(food => !isValidFood(food)));
   const tooMany = Boolean(foods && foods.length > remainingSlots);
+  const retryInSeconds = Math.max(0, Math.ceil((retryAfterUntil - now) / 1000));
+  const estimatedTotals = (foods ?? []).reduce<Nutrients>((totals, food) => {
+    for (const key of nutrientKeys) totals[key] += food.per100g[key] * food.estimatedGrams / 100;
+    return totals;
+  }, { calories: 0, protein: 0, carbs: 0, fat: 0 });
+  const totalLabels: Record<keyof Nutrients, string> = {
+    calories: t('Calories', 'السعرات'), protein: t('Protein', 'البروتين'),
+    carbs: t('Carbs', 'الكارب'), fat: t('Fat', 'الدهون'),
+  };
 
   return (
-    <section className="mt-4 space-y-4 rounded-2xl border border-[var(--border)] bg-[var(--soft)] p-4" aria-label={t('AI food photo analysis', 'تحليل صورة الطعام بالذكاء الاصطناعي')}>
-      <div className="flex gap-3"><Sparkles className="mt-0.5 shrink-0 text-[var(--green)]" size={20} /><div><h3 className="text-sm font-bold">{t('Estimate nutrition with OpenAI', 'تقدير القيم الغذائية عبر OpenAI')}</h3><p id={disclosureId} className="mt-1 text-sm leading-relaxed text-[var(--muted)]">{t('Only when you choose Analyze photo, this photo and your description are sent to OpenAI for analysis. Avoid including personal information. You can always add foods manually.', 'تُرسل هذه الصورة والوصف إلى OpenAI للتحليل فقط عند اختيار «تحليل الصورة». تجنب تضمين معلومات شخصية. يمكنك دائماً إضافة الأطعمة يدوياً.')}</p></div></div>
+    <section className="mt-4 space-y-4 rounded-2xl border border-[var(--border)] bg-[var(--soft)] p-4" aria-label={descriptionMode ? t('AI meal description analysis', 'تحليل وصف الوجبة بالذكاء الاصطناعي') : t('AI food photo analysis', 'تحليل صورة الطعام بالذكاء الاصطناعي')}>
+      <div className="flex gap-3"><Sparkles className="mt-0.5 shrink-0 text-[var(--green)]" size={20} /><div><h3 className="text-sm font-bold">{t('Estimate nutrition with OpenAI', 'تقدير القيم الغذائية عبر OpenAI')}</h3><p id={disclosureId} className="mt-1 text-sm leading-relaxed text-[var(--muted)]">{descriptionMode ? t('Only when you choose Analyze description, your meal description is sent to OpenAI. An attached photo is not sent in this mode. Avoid including personal information.', 'يُرسل وصف وجبتك إلى OpenAI فقط عند اختيار «تحليل الوصف». لا تُرسل أي صورة مرفقة في هذا الوضع. تجنب تضمين معلومات شخصية.') : t('Only when you choose Analyze photo, this photo and your description are sent to OpenAI for analysis. Avoid including personal information. You can always add foods manually.', 'تُرسل هذه الصورة والوصف إلى OpenAI للتحليل فقط عند اختيار «تحليل الصورة». تجنب تضمين معلومات شخصية. يمكنك دائماً إضافة الأطعمة يدوياً.')}</p></div></div>
 
       <div>
-        <label htmlFor={descriptionId} className="text-sm font-semibold">{t('Meal description (optional)', 'وصف الوجبة (اختياري)')}</label>
-        <textarea id={descriptionId} value={description} maxLength={2000} rows={3} onChange={event => changeDescription(event.target.value)} placeholder={t('e.g. Grilled chicken, rice and a teaspoon of olive oil', 'مثلاً: دجاج مشوي وأرز وملعقة صغيرة من زيت الزيتون')} className={`${fieldClass} resize-y`} />
-        <p className="mt-1 text-xs text-[var(--muted)]">{t('Add ingredients, cooking method or portion clues for a better estimate.', 'أضف المكونات أو طريقة الطهي أو معلومات عن الكمية لتحسين التقدير.')}</p>
+        <label htmlFor={descriptionId} className="text-sm font-semibold">{descriptionMode ? t('Meal description', 'وصف الوجبة') : t('Meal description (optional)', 'وصف الوجبة (اختياري)')}</label>
+        <textarea id={descriptionId} value={description} maxLength={2000} required={descriptionMode} rows={descriptionMode ? 4 : 3} onChange={event => changeDescription(event.target.value)} placeholder={t('e.g. 200 g cooked rice, 150 g grilled chicken and 1 tablespoon of olive oil', 'مثلاً: ٢٠٠ غ أرز مطبوخ، ١٥٠ غ دجاج مشوي وملعقة كبيرة من زيت الزيتون')} className={`${fieldClass} resize-y`} />
+        <p className="mt-1 text-xs text-[var(--muted)]">{t('Write in Arabic or English. Include amounts, ingredients and cooking method; we may ask for portion details. Up to 2,000 characters.', 'اكتب بالعربية أو الإنجليزية. اذكر الكميات والمكونات وطريقة الطهي؛ قد نطلب توضيح الكمية. حتى ٢٠٠٠ حرف.')}</p>
       </div>
 
-      {availability === 'checking' && <p role="status" className="text-sm text-[var(--muted)]">{t('Checking photo analysis availability…', 'جارٍ التحقق من توفر تحليل الصور…')}</p>}
-      {availability === 'unavailable' && <p role="status" className="text-sm text-[var(--muted)]">{t('Photo analysis is not configured on the server. You can still add foods manually.', 'تحليل الصور غير مفعّل على الخادم. يمكنك إضافة الأطعمة يدوياً.')}</p>}
-      {availability === 'error' && <div className="text-sm"><p role="status" className="text-[var(--muted)]">{t('Could not check photo analysis availability. Manual food search still works.', 'تعذر التحقق من توفر تحليل الصور. يمكنك استخدام البحث اليدوي عن الطعام.')}</p><button type="button" onClick={() => setAvailabilityAttempt(value => value + 1)} className="mt-2 font-semibold text-[var(--green)] underline underline-offset-4">{t('Retry connection', 'إعادة الاتصال')}</button></div>}
+      {availability === 'checking' && <p role="status" className="text-sm text-[var(--muted)]">{descriptionMode ? t('Checking AI analysis availability…', 'جارٍ التحقق من توفر تحليل الذكاء الاصطناعي…') : t('Checking photo analysis availability…', 'جارٍ التحقق من توفر تحليل الصور…')}</p>}
+      {availability === 'unavailable' && <p role="status" className="text-sm text-[var(--muted)]">{descriptionMode ? t('AI analysis is not configured on the server. You can still add foods manually.', 'تحليل الذكاء الاصطناعي غير مفعّل على الخادم. يمكنك إضافة الأطعمة يدوياً.') : t('Photo analysis is not configured on the server. You can still add foods manually.', 'تحليل الصور غير مفعّل على الخادم. يمكنك إضافة الأطعمة يدوياً.')}</p>}
+      {availability === 'error' && <div className="text-sm"><p role="status" className="text-[var(--muted)]">{t('Could not check AI analysis availability. Manual food search still works.', 'تعذر التحقق من توفر تحليل الذكاء الاصطناعي. يمكنك استخدام البحث اليدوي عن الطعام.')}</p><button type="button" onClick={() => setAvailabilityAttempt(value => value + 1)} className="mt-2 font-semibold text-[var(--green)] underline underline-offset-4">{t('Retry connection', 'إعادة الاتصال')}</button></div>}
 
-      <button type="button" onClick={() => void analyze()} disabled={!photo || preparing || analyzing || availability !== 'available'} aria-describedby={disclosureId} className="inline-flex items-center gap-2 rounded-xl bg-[var(--green)] px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-45 dark:text-[#173b25]">{analyzing ? <LoaderCircle className="animate-spin" size={16} /> : <Sparkles size={16} />}{analyzing ? t('Analyzing photo…', 'جارٍ تحليل الصورة…') : t('Analyze photo', 'تحليل الصورة')}</button>
-      {!photo && <p className="text-xs text-[var(--muted)]">{t('Upload a photo above to use photo analysis.', 'حمّل صورة أعلاه لاستخدام تحليل الصور.')}</p>}
+      <button type="button" onClick={() => void analyze()} disabled={(descriptionMode ? !description.trim() : !photo) || preparing || analyzing || retryInSeconds > 0 || availability !== 'available'} aria-describedby={disclosureId} className="inline-flex items-center gap-2 rounded-xl bg-[var(--green)] px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-45 dark:text-[#173b25]">{analyzing ? <LoaderCircle className="animate-spin" size={16} /> : <Sparkles size={16} />}{analyzing ? (descriptionMode ? t('Analyzing description…', 'جارٍ تحليل الوصف…') : t('Analyzing photo…', 'جارٍ تحليل الصورة…')) : (descriptionMode ? t('Analyze description', 'تحليل الوصف') : t('Analyze photo', 'تحليل الصورة'))}</button>
+      {!descriptionMode && !photo && <p className="text-xs text-[var(--muted)]">{t('Upload a photo above to use photo analysis.', 'حمّل صورة أعلاه لاستخدام تحليل الصور.')}</p>}
       {analyzing && <p role="status" className="text-sm text-[var(--muted)]">{t('Estimating foods and portions. You can edit the description or close this window to cancel.', 'جارٍ تقدير الأطعمة والكميات. يمكنك تعديل الوصف أو إغلاق النافذة لإلغاء التحليل.')}</p>}
       {message && <p role="alert" className="text-sm text-red-700 dark:text-red-300">{message}</p>}
-      {foods?.length === 0 && <p role="status" className="text-sm text-[var(--muted)]">{hadSuggestions ? t('All food estimates were removed. Analyze again or add foods manually.', 'تم حذف جميع تقديرات الطعام. حلّل الصورة مجدداً أو أضف الأطعمة يدوياً.') : t('No food could be identified in this photo. Try another photo or add foods manually.', 'لم يمكن تحديد طعام في هذه الصورة. جرّب صورة أخرى أو أضف الأطعمة يدوياً.')}</p>}
+      {retryInSeconds > 0 && <p role="status" className="text-sm text-[var(--muted)]">{t(`You can try again in ${retryInSeconds} seconds.`, `يمكنك المحاولة مجدداً بعد ${retryInSeconds} ثانية.`)}</p>}
+      {clarification && <div role="status" className="space-y-1 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"><p className="font-semibold">{t('Add portion details', 'أضف تفاصيل الكمية')}</p><p>{clarification}</p><p className="text-xs">{t('Update your description above and analyze again. No nutrition has been added.', 'عدّل الوصف أعلاه ثم حلّله مجدداً. لم تتم إضافة أي قيم غذائية.')}</p></div>}
+      {foods?.length === 0 && <p role="status" className="text-sm text-[var(--muted)]">{hadSuggestions ? t('All food estimates were removed. Analyze again or add foods manually.', 'تم حذف جميع تقديرات الطعام. حلّل الطعام مجدداً أو أضف الأطعمة يدوياً.') : (descriptionMode ? t('No food could be identified in this description. Add food names and quantities, then try again.', 'لم يمكن تحديد طعام في هذا الوصف. أضف أسماء الأطعمة وكمياتها ثم حاول مجدداً.') : t('No food could be identified in this photo. Try another photo or add foods manually.', 'لم يمكن تحديد طعام في هذه الصورة. جرّب صورة أخرى أو أضف الأطعمة يدوياً.'))}</p>}
 
       {Boolean(foods?.length) && <section aria-label={t('Review food estimates', 'مراجعة تقديرات الطعام')} className="space-y-3 border-t border-[var(--border)] pt-4">
         <h4 className="font-bold">{t('Review before adding', 'راجع التقديرات قبل الإضافة')}</h4>
+        {estimateNote && <p role="status" className="text-sm leading-relaxed text-[var(--muted)]">{estimateNote}</p>}
         <p className="text-sm leading-relaxed text-[var(--muted)]">{t('AI estimates can be inaccurate, especially portions, oils and hidden ingredients. Review and correct every food. These values are not suitable for medical decisions.', 'قد تخطئ تقديرات الذكاء الاصطناعي، خصوصاً في الكميات والزيوت والمكونات غير الظاهرة. راجع كل طعام وصحّح قيمه. هذه القيم غير مناسبة لاتخاذ قرارات طبية.')}</p>
+        <section aria-label={t('Estimated nutrition totals', 'إجمالي القيم الغذائية المقدّرة')} className="grid grid-cols-2 gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:grid-cols-4">
+          {nutrientKeys.map(key => <div key={key} className="text-center"><p className="text-lg font-bold text-[var(--green)]">{format(estimatedTotals[key])}<span className="ms-1 text-xs font-normal">{key === 'calories' ? t('kcal', 'سعرة') : t('g', 'غ')}</span></p><p className="text-xs text-[var(--muted)]">{totalLabels[key]}</p></div>)}
+          <p className="col-span-2 text-center text-xs text-[var(--muted)] sm:col-span-4">{t('Estimated total for the portions below · changes as you edit', 'الإجمالي المقدّر للكميات أدناه · يتغير عند التعديل')}</p>
+        </section>
         {foods?.map((food, index) => {
           const portion = Object.fromEntries(nutrientKeys.map(key => [key, food.per100g[key] * food.estimatedGrams / 100])) as Nutrients;
           return <article key={food.reviewId} aria-label={t(`Estimated food ${index + 1}`, `الطعام المقدّر ${index + 1}`)} className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:p-4">

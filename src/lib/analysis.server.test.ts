@@ -4,9 +4,10 @@ import { createAnalysisLimits, createFoodAnalysisHandlers, MAX_IMAGE_BYTES, vali
 
 const validFood = { label: 'Rice', labelAr: 'أرز', estimatedGrams: 150, per100g: { calories: 130, protein: 2.7, carbs: 28, fat: 0.3 }, confidence: 'medium' };
 const jpeg = Uint8Array.from([255, 216, 255, 224, 0, 0, 255, 217]);
-function request(options: { locale?: string; description?: string; image?: File; origin?: string; site?: string; signal?: AbortSignal; url?: string; host?: string; forwardedHost?: string; forwardedProto?: string } = {}) {
+function request(options: { locale?: string; description?: string; image?: File; origin?: string; site?: string; signal?: AbortSignal; url?: string; host?: string; forwardedHost?: string; forwardedProto?: string; mode?: string } = {}) {
   const form = new FormData();
-  form.set('image', options.image ?? new File([jpeg], 'rice.jpg', { type: 'image/jpeg' }));
+  if (options.mode !== 'description' || options.image) form.set('image', options.image ?? new File([jpeg], 'rice.jpg', { type: 'image/jpeg' }));
+  if (options.mode !== undefined) form.set('mode', options.mode);
   form.set('locale', options.locale ?? 'en');
   if (options.description !== undefined) form.set('description', options.description);
   return new Request(options.url ?? 'http://localhost:3000/api/food-analysis', { method: 'POST', body: form, signal: options.signal, headers: {
@@ -16,12 +17,12 @@ function request(options: { locale?: string; description?: string; image?: File;
     ...(options.forwardedProto === undefined ? {} : { 'X-Forwarded-Proto': options.forwardedProto }),
   } });
 }
-function provider(foods: unknown = [validFood]) {
-  return Response.json({ status: 'completed', output: [{ type: 'message', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify({ foods }) }] }] });
+function provider(foods: unknown = [validFood], clarification: unknown = null) {
+  return Response.json({ status: 'completed', output: [{ type: 'message', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify({ foods, clarification }) }] }] });
 }
 function setup(overrides: Parameters<typeof createFoodAnalysisHandlers>[0] = {}) {
   let calls = 0;
-  const handlers = createFoodAnalysisHandlers({ env: () => ({ OPENAI_API_KEY: 'test-only-placeholder' }), limits: createAnalysisLimits(),
+  const handlers = createFoodAnalysisHandlers({ env: () => ({ OPENAI_API_KEY: 'test-only-placeholder' }), limits: createAnalysisLimits(), log: () => {}, sleep: async () => {},
     fetch: async () => { calls++; return provider(); }, ...overrides });
   return { ...handlers, calls: () => calls };
 }
@@ -177,13 +178,13 @@ test('malformed, refused, incomplete and out-of-bounds AI output is never accept
 });
 
 test('provider errors return safe messages and status without raw error data', async () => {
-  for (const [status, expectedStatus, code] of [[401,503,'provider_configuration'], [403,503,'provider_configuration'], [400,503,'provider_configuration'], [404,503,'provider_configuration'], [429,429,'rate_limited'], [500,502,'provider_unavailable']] as const) {
+  for (const [status, expectedStatus, code] of [[401,401,'authentication_error'], [403,403,'permission_denied'], [400,400,'provider_request_error'], [404,503,'model_unavailable'], [429,429,'rate_limited'], [500,502,'provider_unavailable']] as const) {
     const response = await setup({ fetch: async () => new Response('private upstream content secret-key', { status }) }).POST(request());
     assert.equal(response.status, expectedStatus);
     const body = await response.text();
     assert.equal(JSON.parse(body).code, code);
     assert.equal(body.includes('secret-key'), false);
-    if (status === 429) assert.equal(response.headers.get('retry-after'), '60');
+    if (status === 429) assert.equal(response.headers.get('retry-after'), '1');
   }
   const response = await setup({ fetch: async () => { throw new Error('private network details'); } }).POST(request());
   assert.equal(response.status, 502);
@@ -267,4 +268,229 @@ test('only two provider requests can be active and permits are released', async 
   release.forEach(resolve => resolve());
   assert.equal((await first).status, 200); assert.equal((await second).status, 200);
   assert.equal(limits.active, 0);
+});
+
+function upstreamError(status: number, code?: string, type?: string, headers?: HeadersInit) {
+  return Response.json({ error: { code, type, message: 'PRIVATE upstream message must never escape' } }, { status, headers });
+}
+
+test('description mode sends only text with explicit no-invented-portions instructions', async () => {
+  let payload: Record<string, unknown> | undefined;
+  const handler = setup({ fetch: async (_, init) => { payload = JSON.parse(String(init?.body)); return provider(); } });
+  const response = await handler.POST(request({ mode: 'description', description: '150 g cooked rice' }));
+  assert.equal(response.status, 200);
+  const sent = payload as { input: { content: { type: string; text: string }[] }[]; instructions: string; text: { format: { schema: { required: string[] } } } };
+  assert.equal(sent.input[0].content.length, 1);
+  assert.equal(sent.input[0].content[0].type, 'input_text');
+  assert.match(sent.input[0].content[0].text, /150 g cooked rice/);
+  assert.equal(JSON.stringify(sent).includes('input_image'), false);
+  assert.match(sent.instructions, /Do not invent serving sizes/);
+  assert.match(sent.instructions, /Do not produce nutrition estimates until quantities are specified/);
+  assert.deepEqual(sent.text.format.schema.required, ['foods', 'clarification']);
+});
+
+test('text mode requires a description and rejects image uploads or duplicate mode fields', async () => {
+  const handler = setup();
+  for (const invalid of [request({ mode: 'description' }), request({ mode: 'description', description: '   ' }),
+    request({ mode: 'description', description: 'rice', image: new File([jpeg], 'food.jpg', { type: 'image/jpeg' }) }),
+    request({ mode: 'unknown' })]) assert.equal((await handler.POST(invalid)).status, 400);
+  const duplicate = new FormData(); duplicate.append('mode', 'description'); duplicate.append('mode', 'photo'); duplicate.append('description', 'rice');
+  assert.equal((await handler.POST(new Request('http://localhost:3000/api/food-analysis', { method: 'POST', body: duplicate }))).status, 400);
+  assert.equal(handler.calls(), 0);
+});
+
+test('missing portions produce localized clarification without fabricated foods', async () => {
+  const question = { question: 'How many grams of rice did you eat?', questionAr: 'كم غرامًا من الأرز أكلت؟' };
+  const handler = setup({ fetch: async () => provider([], question) });
+  for (const locale of ['ar', 'en']) {
+    const response = await handler.POST(request({ mode: 'description', description: 'rice', locale }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: 'clarification', message: locale === 'ar' ? question.questionAr : question.question });
+  }
+  const conflicting = setup({ fetch: async () => provider([validFood], question) });
+  assert.equal((await conflicting.POST(request({ mode: 'description', description: 'rice' }))).status, 502);
+});
+
+test('unknown and text-only configured models cannot receive images', async () => {
+  for (const model of ['gpt-3.5-turbo', 'o3-mini', 'arbitrary-private-value', 'gpt-4.1-mini-2027-01-01']) {
+    const handler = setup({ env: () => ({ OPENAI_API_KEY: 'test', OPENAI_FOOD_MODEL: model }) });
+    const response = await handler.POST(request());
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'model_not_supported');
+    assert.equal(handler.calls(), 0);
+  }
+  for (const model of ['gpt-4.1-mini-2025-04-14', 'gpt-4o-mini-2024-07-18']) {
+    assert.equal((await setup({ env: () => ({ OPENAI_API_KEY: 'test', OPENAI_FOOD_MODEL: model }) }).POST(request())).status, 200);
+  }
+  assert.equal((await setup({ env: () => ({ OPENAI_API_KEY: 'test', OPENAI_FOOD_MODEL: 'o3-mini' }) }).POST(request({ mode: 'description', description: '150g rice' }))).status, 200);
+});
+
+test('quota and API-key failures are never retried even when upstream status is 429', async () => {
+  for (const [code, type, expected, status] of [
+    ['insufficient_quota', undefined, 'insufficient_quota', 429], [undefined, 'insufficient_quota', 'insufficient_quota', 429],
+    ['invalid_api_key', undefined, 'authentication_error', 401], [undefined, 'invalid_api_key', 'authentication_error', 401],
+  ] as const) {
+    let calls = 0; const sleeps: number[] = [];
+    const handler = setup({ fetch: async () => { calls++; return upstreamError(429, code, type, { 'Retry-After': '5' }); }, sleep: async delay => { sleeps.push(delay); } });
+    const response = await handler.POST(request({ locale: 'ar' })); const result = await response.json();
+    assert.equal(response.status, status); assert.equal(result.code, expected); assert.equal(result.retryable, false);
+    assert.equal(response.headers.has('retry-after'), false); assert.equal('retryAfterSeconds' in result, false);
+    assert.equal(calls, 1); assert.deepEqual(sleeps, []); assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
+    assert.match(result.requestId, /^[a-f0-9-]{36}$/);
+  }
+});
+
+test('transient rate limits retry at most twice with exponential backoff and exact attempt counts', async () => {
+  let time = 1000; let calls = 0; const sleeps: number[] = []; const starts: number[] = [];
+  const limits = createAnalysisLimits();
+  const handler = setup({ limits, now: () => time, sleep: async delay => { sleeps.push(delay); time += delay; }, fetch: async () => {
+    calls++; starts.push(time); return upstreamError(429, 'rate_limit_exceeded');
+  } });
+  const response = await handler.POST(request()); const result = await response.json();
+  assert.equal(calls, 3); assert.deepEqual(sleeps, [500, 1000]); assert.deepEqual(starts, [1000, 1500, 2500]);
+  assert.deepEqual(limits.starts, starts); assert.equal(limits.active, 0);
+  assert.equal(response.status, 429); assert.equal(result.code, 'rate_limited'); assert.equal(result.retryable, true);
+});
+
+test('Retry-After seconds and HTTP-date are respected without retrying early', async () => {
+  for (const retryAfter of ['2', new Date(4000).toUTCString()]) {
+    let time = 1000; let calls = 0; const sleeps: number[] = []; const attempts: number[] = [];
+    const handler = setup({ now: () => time, sleep: async delay => { sleeps.push(delay); time += delay; }, fetch: async () => {
+      attempts.push(time); calls++; return calls === 1 ? upstreamError(429, 'rate_limit_exceeded', undefined, { 'Retry-After': retryAfter }) : provider();
+    } });
+    assert.equal((await handler.POST(request())).status, 200);
+    const expected = retryAfter === '2' ? 2000 : 3000;
+    assert.deepEqual(sleeps, [expected]); assert.deepEqual(attempts, [1000, 1000 + expected]);
+  }
+});
+
+test('long Retry-After returns its real delay rather than retrying beyond the overall budget', async () => {
+  let calls = 0; const sleeps: number[] = [];
+  const handler = setup({ now: () => 1000, fetch: async () => { calls++; return upstreamError(429, 'rate_limit_exceeded', undefined, { 'Retry-After': '60' }); }, sleep: async delay => { sleeps.push(delay); } });
+  const response = await handler.POST(request()); const result = await response.json();
+  assert.equal(calls, 1); assert.deepEqual(sleeps, []); assert.equal(response.status, 429);
+  assert.equal(result.retryAfterSeconds, 60); assert.equal(response.headers.get('retry-after'), '60');
+});
+
+test('transport failures and selected 5xx can recover, while non-transient provider errors do not retry', async () => {
+  for (const initial of ['network', 500, 502, 503, 504] as const) {
+    let calls = 0; const sleeps: number[] = [];
+    const handler = setup({ fetch: async () => { calls++; if (calls === 1) { if (initial === 'network') throw new TypeError('PRIVATE connection details'); return upstreamError(initial); } return provider(); },
+      sleep: async delay => { sleeps.push(delay); } });
+    assert.equal((await handler.POST(request())).status, 200); assert.equal(calls, 2); assert.deepEqual(sleeps, [500]);
+  }
+  for (const status of [400, 401, 403, 404, 501]) {
+    let calls = 0;
+    const response = await setup({ fetch: async () => { calls++; return upstreamError(status); } }).POST(request());
+    assert.equal(calls, 1); assert.equal((await response.json()).retryable, false);
+  }
+});
+
+test('per-attempt timeouts may retry within the single overall deadline', async () => {
+  let calls = 0;
+  const handler = setup({ timeoutMs: 5000, attemptTimeoutMs: 5, fetch: async (_, init) => {
+    calls++; if (calls > 1) return provider();
+    return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+  } });
+  assert.equal((await handler.POST(request())).status, 200); assert.equal(calls, 2);
+});
+
+test('local quota counts every retry and reports the precise remaining window', async () => {
+  let time = 1000; let calls = 0; const limits = createAnalysisLimits(); limits.starts = new Array(9).fill(0);
+  const handler = setup({ limits, now: () => time, fetch: async () => { calls++; return upstreamError(429, 'rate_limit_exceeded'); }, sleep: async delay => { time += delay; } });
+  const response = await handler.POST(request()); const result = await response.json();
+  assert.equal(calls, 1); assert.equal(result.code, 'local_rate_limited'); assert.equal(result.retryAfterSeconds, 59);
+  assert.equal(response.headers.get('retry-after'), '59'); assert.equal(limits.starts.length, 10); assert.equal(limits.active, 0);
+});
+
+test('active concurrency slot remains held throughout backoff', async () => {
+  const limits = createAnalysisLimits(); let calls = 0; const sleepers: (() => void)[] = [];
+  const handler = setup({ limits, fetch: async () => { calls++; return calls <= 2 ? upstreamError(429, 'rate_limit_exceeded') : provider(); },
+    sleep: () => new Promise<void>(resolve => sleepers.push(resolve)) });
+  const first = handler.POST(request()); const second = handler.POST(request());
+  while (sleepers.length < 2) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(limits.active, 2);
+  const blocked = await handler.POST(request()); assert.equal((await blocked.json()).code, 'local_rate_limited'); assert.equal(calls, 2);
+  sleepers.forEach(resolve => resolve()); assert.equal((await first).status, 200); assert.equal((await second).status, 200); assert.equal(limits.active, 0);
+});
+
+test('safe diagnostics correlate requests without logging user data, keys or provider messages/codes', async () => {
+  const entries: unknown[] = []; let calls = 0;
+  const handler = setup({ env: () => ({ OPENAI_API_KEY: 'PRIVATE_SERVER_KEY' }), log: entry => { entries.push(entry); }, fetch: async () => {
+    calls++; return calls === 1 ? upstreamError(429, 'PRIVATE_UNKNOWN_CODE', undefined, { 'X-Request-Id': 'req_safe123' }) : provider();
+  } });
+  await handler.POST(request({ mode: 'description', description: 'PRIVATE_USER_DESCRIPTION 150g rice' }));
+  const encoded = JSON.stringify(entries);
+  for (const forbidden of ['PRIVATE_SERVER_KEY', 'PRIVATE_USER_DESCRIPTION', 'PRIVATE_UNKNOWN_CODE', 'PRIVATE upstream', 'base64', 'per100g']) assert.equal(encoded.includes(forbidden), false);
+  assert.equal(entries.length, 2);
+  const logs = entries as { requestId: string; mode: string; model: string; code: string; attempt: number; retryDelayMs?: number; providerRequestId?: string }[];
+  assert.equal(logs[0].requestId, logs[1].requestId); assert.equal(logs[0].mode, 'description'); assert.equal(logs[0].model, 'gpt-4.1-mini');
+  assert.equal(logs[0].code, 'rate_limited'); assert.equal(logs[0].attempt, 1); assert.equal(logs[0].retryDelayMs, 500); assert.equal(logs[0].providerRequestId, 'req_safe123');
+  assert.equal(logs[1].code, 'success'); assert.equal(logs[1].attempt, 2);
+  const unsafe: unknown[] = [];
+  await setup({ log: entry => unsafe.push(entry), fetch: async () => upstreamError(401, 'invalid_api_key', undefined, { 'X-Request-Id': 'contains spaces private' }) }).POST(request());
+  assert.equal(JSON.stringify(unsafe).includes('contains spaces private'), false);
+});
+
+test('authentication and permission statuses never retry broken, hanging, or oversized response bodies', async () => {
+  for (const status of [401, 403]) {
+    for (const kind of ['broken', 'hanging', 'oversized']) {
+      let calls = 0; let cancelled = false; const sleeps: number[] = [];
+      const handler = setup({ attemptTimeoutMs: 5, fetch: async () => {
+        calls++;
+        const body = kind === 'oversized' ? new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(new Uint8Array(300 * 1024)); }, cancel() { cancelled = true; } })
+          : new ReadableStream<Uint8Array>({ start(controller) { if (kind === 'broken') controller.error(new Error('PRIVATE error')); }, cancel() { cancelled = true; } });
+        return new Response(body, { status });
+      }, sleep: async delay => { sleeps.push(delay); } });
+      const response = await handler.POST(request()); const result = await response.json();
+      assert.equal(response.status, status); assert.equal(result.code, status === 401 ? 'authentication_error' : 'permission_denied');
+      assert.equal(result.retryable, false); assert.equal(calls, 1); assert.deepEqual(sleeps, []);
+      if (kind !== 'broken') assert.equal(cancelled, true);
+    }
+  }
+});
+
+test('generic HTTP400 schema/input failures are distinct from known unsupported models and images', async () => {
+  for (const [code, expected] of [['invalid_json_schema', 'provider_request_error'], ['unsupported_model', 'model_not_supported'], ['model_not_supported', 'model_not_supported'], ['invalid_image_format', 'invalid_image']]) {
+    let calls = 0;
+    const handler = setup({ fetch: async () => { calls++; return upstreamError(400, code); } });
+    const response = await handler.POST(request()); assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, expected); assert.equal(calls, 1);
+  }
+  for (const hanging of [false, true]) {
+    let calls = 0;
+    const handler = setup({ attemptTimeoutMs: 5, fetch: async (_, init) => {
+      calls++;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        if (hanging) init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
+        else controller.error(new Error('broken error body'));
+      } }), { status: 400 });
+    } });
+    const response = await handler.POST(request()); assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'provider_request_error'); assert.equal(calls, 1);
+  }
+});
+
+test('safe diagnostics preserve numeric upstream status for translated failures', async () => {
+  const entries: { upstreamStatus?: number; status: number }[] = [];
+  await setup({ fetch: async () => upstreamError(500), log: entry => entries.push(entry) }).POST(request());
+  assert.equal(entries.length, 3);
+  assert.equal(entries[0].status, 502); assert.equal(entries[0].upstreamStatus, 500);
+});
+
+test('other terminal upstream statuses remain nonretryable when their bodies fail or hang', async () => {
+  for (const status of [422, 501]) {
+    for (const hanging of [false, true]) {
+      let calls = 0;
+      const handler = setup({ attemptTimeoutMs: 5, fetch: async (_, init) => {
+        calls++;
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          if (hanging) init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
+          else controller.error(new Error('private broken body'));
+        } }), { status });
+      } });
+      const response = await handler.POST(request()); const result = await response.json();
+      assert.equal(result.retryable, false); assert.equal(calls, 1);
+    }
+  }
 });

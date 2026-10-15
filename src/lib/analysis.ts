@@ -1,15 +1,22 @@
 import type { Nutrients } from './types';
 
-export type PhotoAnalysisInput = { file: File; description?: string; locale?: 'ar' | 'en'; signal?: AbortSignal };
+export type FoodAnalysisMode = 'photo' | 'description';
+type AnalysisOptions = { locale?: 'ar' | 'en'; signal?: AbortSignal };
+export type PhotoAnalysisInput = AnalysisOptions & { file: File; description?: string };
+export type FoodAnalysisInput =
+  | (PhotoAnalysisInput & { mode: 'photo' })
+  | (AnalysisOptions & { mode: 'description'; description: string });
 export type AnalyzedFood = {
   label: string; labelAr: string; estimatedGrams: number; per100g: Nutrients;
   confidence: 'low' | 'medium' | 'high';
 };
 export type PhotoAnalysisAvailability = { available: boolean; provider: 'openai' };
-export type PhotoAnalysisResult =
+export type FoodAnalysisResult =
   | { status: 'unavailable'; code: 'not_configured'; message: string }
-  | { status: 'error'; code: string; message: string }
+  | { status: 'error'; code: string; message: string; retryable?: boolean; retryAfterSeconds?: number; requestId?: string }
+  | { status: 'clarification'; message: string }
   | { status: 'success'; foods: AnalyzedFood[]; message: string };
+export type PhotoAnalysisResult = FoodAnalysisResult;
 
 // Credentials stay on the server. Results are estimates requiring review.
 export interface FoodPhotoAnalyzer {
@@ -58,9 +65,14 @@ export function parseAnalyzedFoods(value: unknown): AnalyzedFood[] {
 }
 
 export async function getPhotoAnalysisAvailability(signal?: AbortSignal): Promise<PhotoAnalysisAvailability> {
-  const response = await fetch('/api/food-analysis', { cache: 'no-store', signal });
+  signal?.throwIfAborted();
+  const timeout = AbortSignal.timeout(10_000);
+  const response = await fetch('/api/food-analysis', {
+    cache: 'no-store', signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
   if (!response.ok) throw new Error('Could not check photo analysis availability.');
   const result = object(await response.json());
+  signal?.throwIfAborted();
   if (typeof result.available !== 'boolean' || result.provider !== 'openai') throw new Error('Invalid availability response.');
   return { available: result.available, provider: result.provider };
 }
@@ -73,31 +85,87 @@ export function photoDataUrlToFile(photo: string): File {
   return new File([bytes], 'meal-photo.' + (match[1] === 'image/jpeg' ? 'jpg' : match[1].split('/')[1]), { type: match[1] });
 }
 
-/** Browser adapter: only our own server receives the upload; no credential is accepted here. */
-export const apiPhotoAnalyzer: FoodPhotoAnalyzer = {
+function fallback(input: FoodAnalysisInput, status?: number): FoodAnalysisResult {
+  const ar = input.locale === 'ar';
+  if (status === 401 || status === 403) return {
+    status: 'error', code: 'authentication_error', retryable: false,
+    message: ar ? 'تعذّر السماح بطلب التحليل. تحقّق من إعدادات الخادم وصلاحيات مفتاح API.'
+      : 'The analysis request was not authorized. Check the server settings and API key permissions.',
+  };
+  if (status === 429) return {
+    status: 'error', code: 'rate_limited', retryable: true,
+    message: ar ? 'وصل طلب التحليل إلى حد الاستخدام. حاول لاحقًا؛ قد يحتاج حساب API إلى مراجعة حدوده.'
+      : 'The analysis request reached a usage limit. Try later; the API account limits may need review.',
+  };
+  if (status === 408 || status === 504) return {
+    status: 'error', code: 'timeout', retryable: true,
+    message: ar ? 'استغرق التحليل وقتًا طويلًا. حاول مجددًا.' : 'Analysis took too long. Please try again.',
+  };
+  if (status !== undefined && status >= 500) return {
+    status: 'error', code: 'provider_unavailable', retryable: true,
+    message: ar ? 'خدمة التحليل غير متاحة مؤقتًا. حاول لاحقًا.' : 'The analysis service is temporarily unavailable. Please try later.',
+  };
+  return {
+    status: 'error', code: 'request_failed',
+    message: input.mode === 'photo'
+      ? (ar ? 'تعذر تحليل الصورة. حاول مجددًا أو أضف الأطعمة يدويًا.' : 'Could not analyze the photo. Try again or add foods manually.')
+      : (ar ? 'تعذر تحليل الوصف. حاول مجددًا أو أضف الأطعمة يدويًا.' : 'Could not analyze the description. Try again or add foods manually.'),
+  };
+}
+
+function parseResult(value: unknown, ok: boolean): FoodAnalysisResult {
+  const result = object(value);
+  if (typeof result.message !== 'string' || !result.message.trim() || result.message.length > 1000) throw new Error('Invalid analysis message.');
+  if (ok && result.status === 'success') return { status: 'success', foods: parseAnalyzedFoods(result.foods), message: result.message };
+  if (ok && result.status === 'clarification') return { status: 'clarification', message: result.message };
+  if (result.status === 'unavailable' && result.code === 'not_configured') return { status: 'unavailable', code: 'not_configured', message: result.message };
+  if (result.status === 'error' && typeof result.code === 'string' && /^[a-z][a-z0-9_]{0,99}$/.test(result.code)) {
+    return {
+      status: 'error', code: result.code, message: result.message,
+      ...(typeof result.retryable === 'boolean' ? { retryable: result.retryable } : {}),
+      ...(typeof result.retryAfterSeconds === 'number' && Number.isFinite(result.retryAfterSeconds)
+        && result.retryAfterSeconds >= 0 && result.retryAfterSeconds <= Number.MAX_SAFE_INTEGER ? { retryAfterSeconds: result.retryAfterSeconds } : {}),
+      ...(typeof result.requestId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(result.requestId) ? { requestId: result.requestId } : {}),
+    };
+  }
+  throw new Error('Invalid analysis response.');
+}
+
+/** Only our own server receives meal content. Bounded retries belong to the server. */
+export const apiFoodAnalyzer: { analyze(input: FoodAnalysisInput): Promise<FoodAnalysisResult> } = {
   async analyze(input) {
     const ar = input.locale === 'ar';
-    const fallback = ar ? 'تعذر تحليل الصورة. حاول مجدداً أو أضف الأطعمة يدوياً.' : 'Could not analyze the photo. Try again or add foods manually.';
     const timeout = AbortSignal.timeout(45_000);
+    let responseStatus: number | undefined;
     try {
+      input.signal?.throwIfAborted();
       const form = new FormData();
-      form.set('image', input.file);
-      form.set('description', input.description?.trim() ?? '');
+      form.set('mode', input.mode);
       form.set('locale', input.locale ?? 'en');
+      form.set('description', input.description?.trim() ?? '');
+      if (input.mode === 'photo') form.set('image', input.file);
       const response = await fetch('/api/food-analysis', {
         method: 'POST', body: form, cache: 'no-store',
         signal: input.signal ? AbortSignal.any([input.signal, timeout]) : timeout,
       });
-      const result = object(await response.json());
-      if (typeof result.message !== 'string' || result.message.length > 1000) throw new Error('Invalid analysis message.');
-      if (response.ok && result.status === 'success') return { status: 'success', foods: parseAnalyzedFoods(result.foods), message: result.message };
-      if (result.status === 'unavailable' && result.code === 'not_configured') return { status: 'unavailable', code: 'not_configured', message: result.message };
-      if (result.status === 'error' && typeof result.code === 'string' && result.code.length <= 100) return { status: 'error', code: result.code, message: result.message };
-      throw new Error('Invalid analysis response.');
+      responseStatus = response.status;
+      const value: unknown = await response.json();
+      input.signal?.throwIfAborted();
+      return parseResult(value, response.ok);
     } catch (error) {
       if (input.signal?.aborted) throw error;
-      return { status: 'error', code: timeout.aborted ? 'timeout' : 'request_failed', message: timeout.aborted
-        ? (ar ? 'استغرق التحليل وقتاً طويلاً. حاول مجدداً.' : 'Analysis took too long. Please try again.') : fallback };
+      if (timeout.aborted) return fallback(input, 504);
+      if (responseStatus === undefined && error instanceof TypeError) return {
+        status: 'error', code: 'network_error', retryable: true,
+        message: ar ? 'تعذر الاتصال بخادم التحليل. تحقّق من اتصالك بالإنترنت وحاول مجددًا.'
+          : 'Could not connect to the analysis server. Check your internet connection and try again.',
+      };
+      return fallback(input, responseStatus);
     }
   },
+};
+
+/** Compatibility adapter for integrations that still submit photo inputs. */
+export const apiPhotoAnalyzer: FoodPhotoAnalyzer = {
+  analyze: input => apiFoodAnalyzer.analyze({ ...input, mode: 'photo' }),
 };

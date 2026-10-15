@@ -12,7 +12,8 @@
     "start": "next start --hostname 0.0.0.0",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/lib/*.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "diagnose:ai": "tsx scripts/diagnose-ai.ts"
   },
   "dependencies": {
     "@fontsource/tajawal": "^5.3.0",
