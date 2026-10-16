@@ -88,11 +88,21 @@ test('clarification remains a question without invented nutrition or extra serve
 test('API availability reveals no secret and unavailable analysis remains explicit', async context => {
   context.mock.method(globalThis, 'fetch', async (_url: string, init: RequestInit) => init.method === 'POST'
     ? Response.json({ status: 'unavailable', code: 'not_configured', message: 'Analysis is not configured.' }, { status: 503 })
-    : Response.json({ available: false, provider: 'openai', ignored: 'not copied' }));
-  assert.deepEqual(await getPhotoAnalysisAvailability(), { available: false, provider: 'openai' });
+    : Response.json({ available: false, provider: 'gemini', ignored: 'not copied' }));
+  assert.deepEqual(await getPhotoAnalysisAvailability(), { available: false, provider: 'gemini' });
   const result = await apiPhotoAnalyzer.analyze({ file: new File(['photo'], 'food.jpg') });
   assert.equal(result.status, 'unavailable');
   assert.equal('foods' in result, false);
+});
+
+test('availability accepts only the current Gemini provider and rejects stale or malformed responses', async context => {
+  const fetchMock = context.mock.method(globalThis, 'fetch', async () => Response.json({ available: true, provider: 'gemini' }));
+  assert.deepEqual(await getPhotoAnalysisAvailability(), { available: true, provider: 'gemini' });
+  for (const response of [{ available: true, provider: 'openai' }, { available: true, provider: 'unknown' },
+    { available: 'true', provider: 'gemini' }, { available: true }, null]) {
+    fetchMock.mock.mockImplementation(async () => Response.json(response));
+    await assert.rejects(getPhotoAnalysisAvailability(), /Invalid/);
+  }
 });
 
 test('client rejects malformed API claims and never trusts success on a failed HTTP response', async context => {

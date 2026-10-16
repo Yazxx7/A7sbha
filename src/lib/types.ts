@@ -7,7 +7,8 @@ export type Food = {
   category: 'protein' | 'grains' | 'fruit' | 'vegetables' | 'dairy' | 'fats' | 'dishes';
   emoji: string; per100g: Nutrients; servingGrams: number; servingLabel: string; servingLabelAr: string;
 };
-export type EstimatedFood = { source: 'openai'; name: string; nameAr: string; per100g: Nutrients };
+// Keep legacy provenance when users reopen or import previously reviewed estimates.
+export type EstimatedFood = { source: 'gemini' | 'openai'; name: string; nameAr: string; per100g: Nutrients };
 export type MealItem = { id: string; foodId: string; grams: number; estimatedFood?: EstimatedFood };
 export type Meal = { id: string; type: MealType; name: string; date: string; items: MealItem[]; photo?: string; createdAt: string };
 export type Goals = Nutrients & { waterMl: number };

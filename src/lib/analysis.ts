@@ -10,7 +10,7 @@ export type AnalyzedFood = {
   label: string; labelAr: string; estimatedGrams: number; per100g: Nutrients;
   confidence: 'low' | 'medium' | 'high';
 };
-export type PhotoAnalysisAvailability = { available: boolean; provider: 'openai' };
+export type PhotoAnalysisAvailability = { available: boolean; provider: 'gemini' };
 export type FoodAnalysisResult =
   | { status: 'unavailable'; code: 'not_configured'; message: string }
   | { status: 'error'; code: string; message: string; retryable?: boolean; retryAfterSeconds?: number; requestId?: string }
@@ -73,7 +73,7 @@ export async function getPhotoAnalysisAvailability(signal?: AbortSignal): Promis
   if (!response.ok) throw new Error('Could not check photo analysis availability.');
   const result = object(await response.json());
   signal?.throwIfAborted();
-  if (typeof result.available !== 'boolean' || result.provider !== 'openai') throw new Error('Invalid availability response.');
+  if (typeof result.available !== 'boolean' || result.provider !== 'gemini') throw new Error('Invalid availability response.');
   return { available: result.available, provider: result.provider };
 }
 

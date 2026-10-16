@@ -8,12 +8,12 @@ async function main() {
   const handlers = createFoodAnalysisHandlers();
   const availability = await (await handlers.GET()).json();
   if (!availability.available) {
-    console.log('AI diagnosis: OPENAI_API_KEY is not configured in this server environment.');
+    console.log('AI diagnosis: GEMINI_API_KEY is not configured in this server environment.');
     process.exitCode = 1;
     return;
   }
 
-  console.log('Checking the configured OpenAI account with one fixed sample meal. API usage may be billed.');
+  console.log('Checking the configured Google Gemini project with one fixed sample meal. This uses API quota and may incur charges on a paid project.');
   const form = new FormData();
   form.set('mode', 'description');
   form.set('description', '100 grams of cooked white rice.');

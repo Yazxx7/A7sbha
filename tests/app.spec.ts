@@ -79,7 +79,7 @@ test('starts empty without keys, remote food services, or fabricated nutrition',
   await expect(page.getByText('Your progress starts with your first meal. Days without entries show 0 logged.', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Sample • Oats & yogurt', exact: true })).toHaveCount(0);
   await navigate(page, 'My settings');
-  await expect(page.getByText('Your journal stays in this browser. Only the photo or meal description you choose to analyze is sent to OpenAI.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Your journal stays in this browser. Only the photo or meal description you choose to analyze is sent to Google Gemini.', { exact: true })).toBeVisible();
   await expect(page.getByText(/NUTRITION_AI_KEY/)).toHaveCount(0);
   expect(errors).toEqual([]);
   expect(remoteRequests).toEqual([]);
@@ -191,7 +191,7 @@ test('sample week is explicit, marked, charted and selectable', async ({ page })
 
 test('photo attachments remain local and manual food tracking works without an AI key', async ({ page }) => {
   const apiRequests: string[] = [];
-  await page.route('**/api/food-analysis', route => route.fulfill({ json: { available: false, provider: 'openai' } }));
+  await page.route('**/api/food-analysis', route => route.fulfill({ json: { available: false, provider: 'gemini' } }));
   page.on('request', (request) => { if (request.method() === 'POST' && new URL(request.url()).pathname.startsWith('/api/')) apiRequests.push(request.url()); });
   await openApp(page);
   await page.getByRole('button', { name: 'Add Breakfast', exact: true }).click();

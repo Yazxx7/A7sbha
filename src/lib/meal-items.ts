@@ -5,7 +5,7 @@ import type { EstimatedFood, Food, MealItem, Nutrients } from './types';
 export function validateEstimatedFood(value: unknown): EstimatedFood {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Estimated food is invalid.');
   const input = value as Record<string, unknown>;
-  if (input.source !== 'openai') throw new Error('Estimated food source is invalid.');
+  if (input.source !== 'gemini' && input.source !== 'openai') throw new Error('Estimated food source is invalid.');
   for (const field of ['name', 'nameAr'] as const) {
     if (typeof input[field] !== 'string' || !input[field].trim() || input[field].length > 100) {
       throw new Error('Estimated food names must contain 1–100 characters.');
@@ -24,7 +24,7 @@ export function validateEstimatedFood(value: unknown): EstimatedFood {
     }
     per100g[field] = amount;
   }
-  return { source: 'openai', name: input.name as string, nameAr: input.nameAr as string, per100g };
+  return { source: input.source, name: input.name as string, nameAr: input.nameAr as string, per100g };
 }
 
 /** Resolve stored items without allowing estimates to replace local reference foods. */

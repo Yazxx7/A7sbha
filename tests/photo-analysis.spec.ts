@@ -78,7 +78,7 @@ function assertPhotoRequest(request: Request, description: string, locale: 'en' 
   expect(image.body[0]).toBe(0xff);
   expect(image.body[1]).toBe(0xd8);
   expect(request.headers()['authorization']).toBeUndefined();
-  expect(request.postData()).not.toMatch(/OPENAI_API_KEY|NUTRITION_AI_KEY|sk-proj-/);
+  expect(request.postData()).not.toMatch(/GEMINI_API_KEY|OPENAI_API_KEY|NUTRITION_AI_KEY|sk-proj-|AIza[A-Za-z0-9_-]+/);
 }
 
 function assertDescriptionRequest(request: Request, description: string, locale: 'en' | 'ar') {
@@ -88,14 +88,14 @@ function assertDescriptionRequest(request: Request, description: string, locale:
   expect(parts.get('description')!.body.toString('utf8')).toBe(description);
   expect(parts.get('locale')!.body.toString('utf8')).toBe(locale);
   expect(request.headers()['authorization']).toBeUndefined();
-  expect(request.postData()).not.toMatch(/OPENAI_API_KEY|NUTRITION_AI_KEY|sk-proj-|filename=|data:image|profile|targetWeight/);
+  expect(request.postData()).not.toMatch(/GEMINI_API_KEY|OPENAI_API_KEY|NUTRITION_AI_KEY|sk-proj-|AIza[A-Za-z0-9_-]+|filename=|data:image|profile|targetWeight/);
 }
 
 test('real production API accepts the browser host and keeps missing-key analysis honest', async ({ request, baseURL }) => {
   const availability = await request.get('/api/food-analysis');
   expect(availability.status()).toBe(200);
   const configuration = await availability.json();
-  expect(configuration.provider).toBe('openai');
+  expect(configuration.provider).toBe('gemini');
   test.skip(configuration.available, 'Never send a live provider request from the test suite.');
   const response = await request.post('/api/food-analysis', {
     headers: { Origin: baseURL!, 'Sec-Fetch-Site': 'same-origin' },
@@ -122,7 +122,7 @@ test('real production API accepts the browser host and keeps missing-key analysi
 test('sends only on explicit analysis, reviews estimates, and persists mixed local and AI foods', async ({ page }) => {
   const requests: Request[] = [];
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     requests.push(route.request());
     await route.fulfill({ json: estimate });
   });
@@ -168,7 +168,7 @@ test('sends only on explicit analysis, reviews estimates, and persists mixed loc
   expect(saved.meals[0].items).toHaveLength(2);
   expect(saved.meals[0].items[1]).toMatchObject({
     foodId: 'ai-estimate', grams: 200,
-    estimatedFood: { source: 'openai', name: 'Reviewed grilled fish', nameAr: 'سمك مشوي بعد المراجعة', per100g: { calories: 180, protein: 22, carbs: 3, fat: 8 } },
+    estimatedFood: { source: 'gemini', name: 'Reviewed grilled fish', nameAr: 'سمك مشوي بعد المراجعة', per100g: { calories: 180, protein: 22, carbs: 3, fat: 8 } },
   });
   await page.reload();
   await expectDailyTotals(page, 449, 45.1, 28.8, 16.3);
@@ -185,7 +185,7 @@ test('sends only on explicit analysis, reviews estimates, and persists mixed loc
 test('an analysis failure keeps the photo and can be retried without adding duplicate foods', async ({ page }) => {
   let attempts = 0;
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     attempts += 1;
     if (attempts === 1) return route.fulfill({ status: 429, json: { status: 'error', code: 'rate_limited', message: 'Photo analysis is temporarily busy. Please try again.', retryable: true, requestId: 'test-photo-retry' } });
     await route.fulfill({ json: estimate });
@@ -216,7 +216,7 @@ test('replacing a photo cancels stale suggestions even when the image content is
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     requests++;
     if (requests === 1) await pending;
     try { await route.fulfill({ json: estimate }); } catch { /* The superseded browser request was aborted. */ }
@@ -241,7 +241,7 @@ test('replacing a photo cancels stale suggestions even when the image content is
 
 test('an image with no identified foods never creates nutrition and manual search remains usable', async ({ page }) => {
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     await route.fulfill({ json: { status: 'success', foods: [], message: 'No food was found in the image.' } });
   });
   const editor = await openEditor(page);
@@ -264,7 +264,7 @@ test('an image with no identified foods never creates nutrition and manual searc
 test('Arabic photo review works on mobile with the locale and description sent only on consent', async ({ page }) => {
   const requests: Request[] = [];
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     requests.push(route.request());
     await route.fulfill({ json: estimate });
   });
@@ -301,7 +301,7 @@ test('Arabic photo review works on mobile with the locale and description sent o
 test('description analysis needs no photo, reviews editable nutrition totals, and saves real diary items', async ({ page }) => {
   const requests: Request[] = [];
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     requests.push(route.request());
     await route.fulfill({ json: descriptionEstimate });
   });
@@ -343,7 +343,7 @@ test('description analysis needs no photo, reviews editable nutrition totals, an
   expect(saved.meals).toHaveLength(1);
   expect(saved.meals[0].photo).toBeUndefined();
   expect(saved.meals[0].items).toHaveLength(3);
-  expect(saved.meals[0].items[0]).toMatchObject({ foodId: 'ai-estimate', grams: 180, estimatedFood: { source: 'openai', per100g: { calories: 120, protein: 3, carbs: 25, fat: 1 } } });
+  expect(saved.meals[0].items[0]).toMatchObject({ foodId: 'ai-estimate', grams: 180, estimatedFood: { source: 'gemini', per100g: { calories: 120, protein: 3, carbs: 25, fat: 1 } } });
   await page.reload();
   await expectDailyTotals(page, 551.9, 51.9, 45, 17.2);
   await page.getByRole('button', { name: 'Edit meal: Description rice and chicken', exact: true }).click();
@@ -358,7 +358,7 @@ test('description analysis needs no photo, reviews editable nutrition totals, an
 test('Arabic meal description works on mobile and excludes an attached photo from the consented request', async ({ page }) => {
   const requests: Request[] = [];
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     requests.push(route.request());
     await route.fulfill({ json: estimate });
   });
@@ -395,7 +395,7 @@ test('Arabic meal description works on mobile and excludes an attached photo fro
 test('missing quantities request clarification without inventing foods and only resend after the user adds detail', async ({ page }) => {
   const requests: Request[] = [];
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     requests.push(route.request());
     if (requests.length === 1) return route.fulfill({ json: { status: 'clarification', message: 'How many grams of cooked rice and grilled chicken did you eat?' } });
     await route.fulfill({ json: descriptionEstimate });
@@ -423,17 +423,65 @@ test('missing quantities request clarification without inventing foods and only 
   await expectNoSavedMeals(page);
 });
 
+test('legacy OpenAI estimates survive reload and remain editable beside new Gemini estimates in the same meal', async ({ page }) => {
+  const requests: Request[] = [];
+  await page.route('**/api/food-analysis', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
+    requests.push(route.request());
+    await route.fulfill({ json: estimate });
+  });
+  await page.goto('/');
+  const date = await page.getByLabel('Journal date', { exact: true }).inputValue();
+  const legacy: LocalState = {
+    version: 1,
+    meals: [{
+      id: 'legacy-openai-meal', type: 'lunch', name: 'Legacy mixed-provider lunch', date, createdAt: `${date}T12:00:00.000Z`,
+      items: [{ id: 'legacy-openai-item', foodId: 'ai-estimate', grams: 100,
+        estimatedFood: { source: 'openai', name: 'Legacy reviewed salmon', nameAr: 'سلمون تمت مراجعته سابقاً', per100g: { calories: 100, protein: 20, carbs: 10, fat: 5 } } }],
+    }],
+    goals: { calories: 2200, protein: 150, carbs: 250, fat: 70, waterMl: 2500 },
+    profile: null, targetSource: 'manual', weights: [], water: {}, locale: 'en', theme: 'light', demoLoaded: false,
+  };
+  await page.evaluate(({ key, state }) => localStorage.setItem(key, JSON.stringify(state)), { key: storageKey, state: legacy });
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Legacy mixed-provider lunch', exact: true })).toBeVisible();
+  await expectDailyTotals(page, 100, 20, 10, 5);
+  await expect(page.getByRole('alert').filter({ hasText: 'Browser storage needs attention.' })).toHaveCount(0);
+  expect((await storedState(page)).meals[0].items[0].estimatedFood?.source).toBe('openai');
+  await page.getByRole('button', { name: 'Edit meal: Legacy mixed-provider lunch', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Edit your meal', exact: true });
+  await editor.getByLabel('Legacy reviewed salmon portion in grams', { exact: true }).fill('150');
+  await editor.getByRole('tab', { name: 'Meal description', exact: true }).click();
+  await editor.getByRole('textbox', { name: 'Meal description', exact: true }).fill('150 grams of grilled fish');
+  await editor.getByRole('button', { name: 'Analyze description', exact: true }).click();
+  const review = editor.getByRole('region', { name: 'Review food estimates', exact: true });
+  await expect(review).toBeVisible();
+  await review.getByRole('button', { name: 'Add reviewed foods', exact: true }).click();
+  await editor.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expectDailyTotals(page, 450, 66, 15, 22.5);
+  const saved = await storedState(page);
+  expect(saved.meals).toHaveLength(1);
+  expect(saved.meals[0].items.map(item => item.estimatedFood?.source)).toEqual(['openai', 'gemini']);
+  expect(saved.meals[0].items[0]).toMatchObject({ grams: 150, estimatedFood: legacy.meals[0].items[0].estimatedFood });
+  assertDescriptionRequest(requests[0], '150 grams of grilled fish', 'en');
+  await page.reload();
+  await expectDailyTotals(page, 450, 66, 15, 22.5);
+  await expect(page.getByRole('alert').filter({ hasText: 'Browser storage needs attention.' })).toHaveCount(0);
+  expect((await storedState(page)).meals[0].items.map(item => item.estimatedFood?.source)).toEqual(['openai', 'gemini']);
+  expect(requests).toHaveLength(1);
+});
+
 for (const scenario of [
-  { name: 'insufficient quota', locale: 'en', status: 429, code: 'insufficient_quota', message: 'OpenAI API quota is exhausted. Check billing and project limits.', retryable: false },
-  { name: 'an invalid API key in Arabic', locale: 'ar', status: 401, code: 'authentication_error', message: 'مفتاح OpenAI على الخادم غير صالح. اطلب من مسؤول الموقع تحديثه.', retryable: false },
+  { name: 'insufficient quota', locale: 'en', status: 429, code: 'insufficient_quota', message: 'Google Gemini API quota is exhausted. Check billing and project limits.', retryable: false },
+  { name: 'an invalid API key in Arabic', locale: 'ar', status: 401, code: 'authentication_error', message: 'مفتاح Google Gemini على الخادم غير صالح. اطلب من مسؤول الموقع تحديثه.', retryable: false },
   { name: 'an upstream timeout', locale: 'en', status: 504, code: 'timeout', message: 'Food analysis took too long. Please try again.', retryable: true },
-  { name: 'an upstream network failure', locale: 'en', status: 502, code: 'network_error', message: 'Could not reach OpenAI. Please try again later.', retryable: true },
+  { name: 'an upstream network failure', locale: 'en', status: 502, code: 'network_error', message: 'Could not reach Google Gemini. Please try again later.', retryable: true },
 ] as const) {
   test(`description analysis clearly shows ${scenario.name} without fake food or automatic browser retries`, async ({ page }) => {
     let attempts = 0;
     await page.clock.install();
     await page.route('**/api/food-analysis', async route => {
-      if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+      if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
       attempts++;
       await route.fulfill({ status: scenario.status, json: { status: 'error', code: scenario.code, message: scenario.message, retryable: scenario.retryable, requestId: 'test-safe-diagnostic-id' } });
     });
@@ -455,13 +503,41 @@ for (const scenario of [
   });
 }
 
+test('an unavailable Gemini model shows the API error and manual food tracking still saves correctly', async ({ page }) => {
+  let attempts = 0;
+  const message = 'The configured Gemini model is unavailable. Ask the site owner to check GEMINI_MODEL and model access.';
+  await page.route('**/api/food-analysis', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
+    attempts++;
+    await route.fulfill({ status: 503, json: { status: 'error', code: 'model_unavailable', message, retryable: false, requestId: 'test-gemini-model' } });
+  });
+  const editor = await openEditor(page);
+  await editor.getByLabel('Meal name (optional)', { exact: true }).fill('Manual fallback breakfast');
+  await editor.getByRole('tab', { name: 'Meal description', exact: true }).click();
+  await editor.getByRole('textbox', { name: 'Meal description', exact: true }).fill('100 grams of banana');
+  await editor.getByRole('button', { name: 'Analyze description', exact: true }).click();
+  await expect(editor.getByRole('alert')).toContainText(message);
+  await expect(editor.getByRole('region', { name: 'Review food estimates', exact: true })).toHaveCount(0);
+  await expectNoSavedMeals(page);
+  await editor.getByRole('tab', { name: 'Search foods', exact: true }).click();
+  await editor.getByLabel('Search foods in Arabic or English', { exact: true }).fill('banana');
+  await editor.getByRole('button', { name: 'Add Banana', exact: true }).click();
+  await editor.getByLabel('Banana portion in grams', { exact: true }).fill('100');
+  await editor.getByRole('button', { name: 'Save meal', exact: true }).click();
+  await expectDailyTotals(page, 89, 1.1, 22.8, 0.3);
+  expect((await storedState(page)).meals[0].items[0].estimatedFood).toBeUndefined();
+  await page.reload();
+  await expectDailyTotals(page, 89, 1.1, 22.8, 0.3);
+  expect(attempts).toBe(1);
+});
+
 test('Retry-After locks the analysis button briefly, then allows a manual retry without sending automatically', async ({ page }) => {
   let attempts = 0;
   await page.clock.install();
   await page.route('**/api/food-analysis', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'openai' } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, provider: 'gemini' } });
     attempts++;
-    if (attempts === 1) return route.fulfill({ status: 429, headers: { 'Retry-After': '2' }, json: { status: 'error', code: 'rate_limited', message: 'OpenAI is receiving too many requests. Try again shortly.', retryable: true, retryAfterSeconds: 2, requestId: 'test-rate-limit' } });
+    if (attempts === 1) return route.fulfill({ status: 429, headers: { 'Retry-After': '2' }, json: { status: 'error', code: 'rate_limited', message: 'Google Gemini is receiving too many requests. Try again shortly.', retryable: true, retryAfterSeconds: 2, requestId: 'test-rate-limit' } });
     await route.fulfill({ json: estimate });
   });
   const editor = await openEditor(page);
@@ -469,7 +545,7 @@ test('Retry-After locks the analysis button briefly, then allows a manual retry 
   await editor.getByRole('textbox', { name: 'Meal description', exact: true }).fill('150 grams of grilled fish');
   const analyze = editor.getByRole('button', { name: 'Analyze description', exact: true });
   await analyze.click();
-  await expect(editor.getByRole('alert')).toContainText('OpenAI is receiving too many requests. Try again shortly.');
+  await expect(editor.getByRole('alert')).toContainText('Google Gemini is receiving too many requests. Try again shortly.');
   await expect(analyze).toBeDisabled();
   await expect(editor.getByRole('status').filter({ hasText: /You can try again in \d+ seconds\./ })).toBeVisible();
   expect(attempts).toBe(1);

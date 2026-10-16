@@ -162,7 +162,7 @@ export default function PhotoAnalysisPanel({ locale, mode, photo, preparing, rem
     appendRef.current = true;
     const items: MealItem[] = foods.map(food => ({
       id: crypto.randomUUID(), foodId: 'ai-estimate', grams: food.estimatedGrams,
-      estimatedFood: { source: 'openai', name: food.label.trim(), nameAr: food.labelAr.trim(), per100g: { ...food.per100g } },
+      estimatedFood: { source: 'gemini', name: food.label.trim(), nameAr: food.labelAr.trim(), per100g: { ...food.per100g } },
     }));
     if (onAdd(items)) setAdded(true);
     else appendRef.current = false;
@@ -191,7 +191,7 @@ export default function PhotoAnalysisPanel({ locale, mode, photo, preparing, rem
 
   return (
     <section className="mt-4 space-y-4 rounded-2xl border border-[var(--border)] bg-[var(--soft)] p-4" aria-label={descriptionMode ? t('AI meal description analysis', 'تحليل وصف الوجبة بالذكاء الاصطناعي') : t('AI food photo analysis', 'تحليل صورة الطعام بالذكاء الاصطناعي')}>
-      <div className="flex gap-3"><Sparkles className="mt-0.5 shrink-0 text-[var(--green)]" size={20} /><div><h3 className="text-sm font-bold">{t('Estimate nutrition with OpenAI', 'تقدير القيم الغذائية عبر OpenAI')}</h3><p id={disclosureId} className="mt-1 text-sm leading-relaxed text-[var(--muted)]">{descriptionMode ? t('Only when you choose Analyze description, your meal description is sent to OpenAI. An attached photo is not sent in this mode. Avoid including personal information.', 'يُرسل وصف وجبتك إلى OpenAI فقط عند اختيار «تحليل الوصف». لا تُرسل أي صورة مرفقة في هذا الوضع. تجنب تضمين معلومات شخصية.') : t('Only when you choose Analyze photo, this photo and your description are sent to OpenAI for analysis. Avoid including personal information. You can always add foods manually.', 'تُرسل هذه الصورة والوصف إلى OpenAI للتحليل فقط عند اختيار «تحليل الصورة». تجنب تضمين معلومات شخصية. يمكنك دائماً إضافة الأطعمة يدوياً.')}</p></div></div>
+      <div className="flex gap-3"><Sparkles className="mt-0.5 shrink-0 text-[var(--green)]" size={20} /><div><h3 className="text-sm font-bold">{t('Estimate nutrition with Google Gemini', 'تقدير القيم الغذائية عبر Gemini')}</h3><p id={disclosureId} className="mt-1 text-sm leading-relaxed text-[var(--muted)]">{descriptionMode ? t('Only when you choose Analyze description, your meal description is sent to Google Gemini. An attached photo is not sent in this mode. Avoid including personal information.', 'يُرسل وصف وجبتك إلى Gemini فقط عند اختيار «تحليل الوصف». لا تُرسل أي صورة مرفقة في هذا الوضع. تجنب تضمين معلومات شخصية.') : t('Only when you choose Analyze photo, this photo and your description are sent to Google Gemini for analysis. Avoid including personal information. You can always add foods manually.', 'تُرسل هذه الصورة والوصف إلى Gemini للتحليل فقط عند اختيار «تحليل الصورة». تجنب تضمين معلومات شخصية. يمكنك دائماً إضافة الأطعمة يدوياً.')}</p></div></div>
 
       <div>
         <label htmlFor={descriptionId} className="text-sm font-semibold">{descriptionMode ? t('Meal description', 'وصف الوجبة') : t('Meal description (optional)', 'وصف الوجبة (اختياري)')}</label>

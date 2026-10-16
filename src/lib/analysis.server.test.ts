@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ApiError } from '@google/genai';
 import { createAnalysisLimits, createFoodAnalysisHandlers, MAX_IMAGE_BYTES, validateAnalyzedFoods } from './analysis.server';
 
 const validFood = { label: 'Rice', labelAr: 'أرز', estimatedGrams: 150, per100g: { calories: 130, protein: 2.7, carbs: 28, fat: 0.3 }, confidence: 'medium' };
@@ -18,20 +19,20 @@ function request(options: { locale?: string; description?: string; image?: File;
   } });
 }
 function provider(foods: unknown = [validFood], clarification: unknown = null) {
-  return Response.json({ status: 'completed', output: [{ type: 'message', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify({ foods, clarification }) }] }] });
+  return Response.json({ candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ text: JSON.stringify({ foods, clarification }) }] } }] });
 }
 function setup(overrides: Parameters<typeof createFoodAnalysisHandlers>[0] = {}) {
   let calls = 0;
-  const handlers = createFoodAnalysisHandlers({ env: () => ({ OPENAI_API_KEY: 'test-only-placeholder' }), limits: createAnalysisLimits(), log: () => {}, sleep: async () => {},
+  const handlers = createFoodAnalysisHandlers({ env: () => ({ GEMINI_API_KEY: 'test-only-placeholder' }), limits: createAnalysisLimits(), log: () => {}, sleep: async () => {},
     fetch: async () => { calls++; return provider(); }, ...overrides });
   return { ...handlers, calls: () => calls };
 }
 
 test('availability is key presence only, never exposes credentials, and is not cached', async () => {
   const configured = await setup().GET();
-  assert.deepEqual(await configured.json(), { available: true, provider: 'openai' });
+  assert.deepEqual(await configured.json(), { available: true, provider: 'gemini' });
   assert.equal(configured.headers.get('cache-control'), 'no-store');
-  assert.deepEqual(await (await setup({ env: () => ({ OPENAI_API_KEY: ' ' }) }).GET()).json(), { available: false, provider: 'openai' });
+  assert.deepEqual(await (await setup({ env: () => ({ GEMINI_API_KEY: ' ' }) }).GET()).json(), { available: false, provider: 'gemini' });
 });
 
 test('missing key returns localized unavailable without a provider request', async () => {
@@ -45,32 +46,31 @@ test('missing key returns localized unavailable without a provider request', asy
   assert.equal(handler.calls(), 0);
 });
 
-test('valid image sends Responses structured schema, no persistence, and returns reviewed estimates', async () => {
+test('official SDK sends real Gemini image JSON, header authentication, and structured schema', async () => {
   let sent: Record<string, unknown> | undefined;
   const handler = setup({ fetch: async (url, init) => {
-    assert.equal(url, 'https://api.openai.com/v1/responses');
-    assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-only-placeholder');
-    sent = JSON.parse(String(init?.body));
-    return provider();
+    assert.equal(String(url), 'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent');
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get('x-goog-api-key'), 'test-only-placeholder');
+    assert.equal(headers.has('authorization'), false);
+    sent = JSON.parse(String(init?.body)); return provider();
   } });
   const response = await handler.POST(request({ description: 'Rice with lunch', origin: 'http://localhost:3000' }));
   assert.equal(response.status, 200);
-  const result = await response.json();
-  assert.deepEqual(result.foods, [validFood]);
-  assert.match(result.message, /Review/);
-  assert.equal(sent?.model, 'gpt-4.1-mini');
-  assert.equal(sent?.store, false);
-  const body = sent as { input: { content: { type: string; image_url?: string; detail?: string; text?: string }[] }[]; text: { format: { type: string; strict: boolean; schema: unknown } } };
-  assert.equal(body.text.format.type, 'json_schema');
-  assert.equal(body.text.format.strict, true);
-  assert.match(body.input[0].content[1].image_url ?? '', /^data:image\/jpeg;base64,/);
-  assert.equal(body.input[0].content[1].detail, 'high');
-  assert.match(body.input[0].content[0].text ?? '', /Rice with lunch/);
+  const result = await response.json(); assert.deepEqual(result.foods, [validFood]); assert.match(result.message, /Review/);
+  const body = sent as { contents: { parts: { inlineData?: { mimeType: string; data: string }; text?: string }[] }[];
+    generationConfig: { responseMimeType: string; responseJsonSchema: { required: string[] } } };
+  assert.equal(body.generationConfig.responseMimeType, 'application/json');
+  assert.deepEqual(body.generationConfig.responseJsonSchema.required, ['foods', 'clarification']);
+  assert.equal(body.contents[0].parts[1].inlineData?.mimeType, 'image/jpeg');
+  assert.equal(body.contents[0].parts[1].inlineData?.data, Buffer.from(jpeg).toString('base64'));
+  assert.match(body.contents[0].parts[0].text ?? '', /Rice with lunch/);
+  assert.equal(JSON.stringify(sent).includes('image_url'), false);
 });
 
-test('optional configured model is used on the server', async () => {
-  const handler = setup({ env: () => ({ OPENAI_API_KEY: 'test', OPENAI_FOOD_MODEL: 'gpt-4.1' }), fetch: async (_, init) => {
-    assert.equal(JSON.parse(String(init?.body)).model, 'gpt-4.1'); return provider();
+test('optional configured Gemini model is used on the server', async () => {
+  const handler = setup({ env: () => ({ GEMINI_API_KEY: 'test', GEMINI_FOOD_MODEL: 'gemini-2.5-flash' }), fetch: async (url) => {
+    assert.match(String(url), /models\/gemini-2\.5-flash:generateContent$/); return provider();
   } });
   assert.equal((await handler.POST(request())).status, 200);
 });
@@ -160,9 +160,9 @@ test('image limit and actual streamed request limit are enforced without Content
 test('malformed, refused, incomplete and out-of-bounds AI output is never accepted', async () => {
   const badResponses = [
     () => new Response('not json'),
-    () => Response.json({ status: 'incomplete', output: [] }),
-    () => Response.json({ status: 'completed', output: [{ type: 'message', status: 'completed', content: [{ type: 'refusal', refusal: 'No' }] }] }),
-    () => Response.json({ status: 'completed', output: [] }),
+    () => Response.json({ candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{}' }] } }] }),
+    () => Response.json({ candidates: [{ finishReason: 'STOP', content: { parts: [{ functionCall: { name: 'unrequested' } }] } }] }),
+    () => Response.json({ candidates: [] }),
     () => provider([{ ...validFood, estimatedGrams: 0 }]),
     () => provider([{ ...validFood, per100g: { ...validFood.per100g, protein: 101 } }]),
     () => provider(new Array(21).fill(validFood)),
@@ -197,13 +197,25 @@ test('provider response stream is bounded', async () => {
   assert.equal((await response.json()).code, 'invalid_response');
 });
 
-test('provider timeout is bounded, localized, and aborts the outgoing request', async () => {
+test('provider timeout is bounded, localized, and aborts the outgoing request', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let time = 0;
+  let fetchStarted!: () => void;
+  const started = new Promise<void>(resolve => { fetchStarted = resolve; });
   let signal: AbortSignal | undefined;
-  const handler = setup({ timeoutMs: 5, fetch: async (_, init) => {
+  const handler = setup({ timeoutMs: 50, now: () => time, fetch: async (_, init) => {
     signal = init?.signal as AbortSignal;
-    return new Promise<Response>((_, reject) => signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    return new Promise<Response>((_, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      fetchStarted();
+    });
   } });
-  const response = await handler.POST(request({ locale: 'ar' }));
+  const pending = handler.POST(request({ locale: 'ar' }));
+  await started;
+  assert.equal(signal?.aborted, false);
+  time = 50;
+  context.mock.timers.tick(50);
+  const response = await pending;
   assert.equal(response.status, 504);
   const body = await response.json();
   assert.equal(body.code, 'timeout');
@@ -211,16 +223,30 @@ test('provider timeout is bounded, localized, and aborts the outgoing request', 
   assert.equal(signal?.aborted, true);
 });
 
-test('provider response body remains inside the timeout after headers arrive', async () => {
+test('provider response body remains inside the timeout after headers arrive', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let time = 0;
+  let bodyOpened!: () => void;
+  const opened = new Promise<void>(resolve => { bodyOpened = resolve; });
   let signal: AbortSignal | undefined;
   let closed = false;
-  const handler = setup({ timeoutMs: 5, fetch: async (_, init) => {
+  const handler = setup({ timeoutMs: 50, now: () => time, fetch: async (_, init) => {
     signal = init?.signal as AbortSignal;
-    return new Response(new ReadableStream<Uint8Array>({ start(controller) {
-      signal?.addEventListener('abort', () => { closed = true; controller.error(new DOMException('aborted', 'AbortError')); });
-    } }));
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal?.addEventListener('abort', () => { closed = true; controller.error(new DOMException('aborted', 'AbortError')); });
+      },
+      // Zero buffering means this hook runs only once the handler reads the body.
+      pull() { bodyOpened(); },
+    }, { highWaterMark: 0 }));
   } });
-  const response = await handler.POST(request());
+  const pending = handler.POST(request());
+  await opened;
+  assert.equal(closed, false);
+  assert.equal(signal?.aborted, false);
+  time = 50;
+  context.mock.timers.tick(50);
+  const response = await pending;
   assert.equal(response.status, 504);
   assert.equal(closed, true);
   assert.equal(signal?.aborted, true);
@@ -270,23 +296,21 @@ test('only two provider requests can be active and permits are released', async 
   assert.equal(limits.active, 0);
 });
 
-function upstreamError(status: number, code?: string, type?: string, headers?: HeadersInit) {
-  return Response.json({ error: { code, type, message: 'PRIVATE upstream message must never escape' } }, { status, headers });
+function upstreamError(status: number, reason?: string, rpcStatus?: string, headers?: HeadersInit) {
+  return Response.json({ error: { code: status, status: rpcStatus, message: 'PRIVATE upstream message must never escape',
+    details: reason ? [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason }] : [] } }, { status, headers });
 }
 
 test('description mode sends only text with explicit no-invented-portions instructions', async () => {
   let payload: Record<string, unknown> | undefined;
   const handler = setup({ fetch: async (_, init) => { payload = JSON.parse(String(init?.body)); return provider(); } });
-  const response = await handler.POST(request({ mode: 'description', description: '150 g cooked rice' }));
-  assert.equal(response.status, 200);
-  const sent = payload as { input: { content: { type: string; text: string }[] }[]; instructions: string; text: { format: { schema: { required: string[] } } } };
-  assert.equal(sent.input[0].content.length, 1);
-  assert.equal(sent.input[0].content[0].type, 'input_text');
-  assert.match(sent.input[0].content[0].text, /150 g cooked rice/);
-  assert.equal(JSON.stringify(sent).includes('input_image'), false);
-  assert.match(sent.instructions, /Do not invent serving sizes/);
-  assert.match(sent.instructions, /Do not produce nutrition estimates until quantities are specified/);
-  assert.deepEqual(sent.text.format.schema.required, ['foods', 'clarification']);
+  const response = await handler.POST(request({ mode: 'description', description: '150 g cooked rice' })); assert.equal(response.status, 200);
+  const sent = payload as { contents: { parts: { text: string }[] }[]; systemInstruction: { parts: { text: string }[] }; generationConfig: { responseJsonSchema: { required: string[] } } };
+  assert.equal(sent.contents[0].parts.length, 1); assert.match(sent.contents[0].parts[0].text, /150 g cooked rice/);
+  assert.equal(JSON.stringify(sent).includes('inlineData'), false);
+  assert.match(sent.systemInstruction.parts[0].text, /Do not invent serving sizes/);
+  assert.match(sent.systemInstruction.parts[0].text, /Do not produce nutrition estimates until quantities are specified/);
+  assert.deepEqual(sent.generationConfig.responseJsonSchema.required, ['foods', 'clarification']);
 });
 
 test('text mode requires a description and rejects image uploads or duplicate mode fields', async () => {
@@ -311,32 +335,40 @@ test('missing portions produce localized clarification without fabricated foods'
   assert.equal((await conflicting.POST(request({ mode: 'description', description: 'rice' }))).status, 502);
 });
 
-test('unknown and text-only configured models cannot receive images', async () => {
-  for (const model of ['gpt-3.5-turbo', 'o3-mini', 'arbitrary-private-value', 'gpt-4.1-mini-2027-01-01']) {
-    const handler = setup({ env: () => ({ OPENAI_API_KEY: 'test', OPENAI_FOOD_MODEL: model }) });
-    const response = await handler.POST(request());
-    assert.equal(response.status, 400);
-    assert.equal((await response.json()).code, 'model_not_supported');
-    assert.equal(handler.calls(), 0);
+test('unknown and nonvision Gemini models cannot receive images', async () => {
+  for (const model of ['text-embedding-004', 'arbitrary-private-value', 'gemini-unreviewed-preview']) {
+    const handler = setup({ env: () => ({ GEMINI_API_KEY: 'test', GEMINI_FOOD_MODEL: model }) });
+    const response = await handler.POST(request()); assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'model_not_supported'); assert.equal(handler.calls(), 0);
   }
-  for (const model of ['gpt-4.1-mini-2025-04-14', 'gpt-4o-mini-2024-07-18']) {
-    assert.equal((await setup({ env: () => ({ OPENAI_API_KEY: 'test', OPENAI_FOOD_MODEL: model }) }).POST(request())).status, 200);
+  for (const model of ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-2.5-flash-lite']) {
+    assert.equal((await setup({ env: () => ({ GEMINI_API_KEY: 'test', GEMINI_FOOD_MODEL: model }) }).POST(request())).status, 200);
   }
-  assert.equal((await setup({ env: () => ({ OPENAI_API_KEY: 'test', OPENAI_FOOD_MODEL: 'o3-mini' }) }).POST(request({ mode: 'description', description: '150g rice' }))).status, 200);
 });
 
-test('quota and API-key failures are never retried even when upstream status is 429', async () => {
-  for (const [code, type, expected, status] of [
-    ['insufficient_quota', undefined, 'insufficient_quota', 429], [undefined, 'insufficient_quota', 'insufficient_quota', 429],
-    ['invalid_api_key', undefined, 'authentication_error', 401], [undefined, 'invalid_api_key', 'authentication_error', 401],
-  ] as const) {
+test('zero and exhausted daily Gemini quotas are never retried', async () => {
+  for (const violation of [{ quotaId: 'GenerateRequestsPerMinutePerProjectPerModel', quotaValue: '0' },
+    { quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', quotaValue: '20' }]) {
     let calls = 0; const sleeps: number[] = [];
-    const handler = setup({ fetch: async () => { calls++; return upstreamError(429, code, type, { 'Retry-After': '5' }); }, sleep: async delay => { sleeps.push(delay); } });
+    const handler = setup({ fetch: async () => { calls++; return Response.json({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'PRIVATE quota details',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [violation] },
+        { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '5s' }] } }, { status: 429, headers: { 'Retry-After': '5' } }); },
+      sleep: async delay => { sleeps.push(delay); } });
     const response = await handler.POST(request({ locale: 'ar' })); const result = await response.json();
-    assert.equal(response.status, status); assert.equal(result.code, expected); assert.equal(result.retryable, false);
+    assert.equal(response.status, 429); assert.equal(result.code, 'insufficient_quota'); assert.equal(result.retryable, false);
     assert.equal(response.headers.has('retry-after'), false); assert.equal('retryAfterSeconds' in result, false);
     assert.equal(calls, 1); assert.deepEqual(sleeps, []); assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
     assert.match(result.requestId, /^[a-f0-9-]{36}$/);
+  }
+});
+
+test('Gemini invalid API keys including HTTP400 are not retried', async () => {
+  for (const status of [400, 401, 429]) {
+    let calls = 0; const sleeps: number[] = [];
+    const handler = setup({ fetch: async () => { calls++; return upstreamError(status, 'API_KEY_INVALID', undefined, { 'Retry-After': '5' }); }, sleep: async delay => { sleeps.push(delay); } });
+    const response = await handler.POST(request()); const result = await response.json();
+    assert.equal(response.status, 401); assert.equal(result.code, 'authentication_error'); assert.equal(result.retryable, false);
+    assert.equal(response.headers.has('retry-after'), false); assert.equal(calls, 1); assert.deepEqual(sleeps, []);
   }
 });
 
@@ -344,7 +376,7 @@ test('transient rate limits retry at most twice with exponential backoff and exa
   let time = 1000; let calls = 0; const sleeps: number[] = []; const starts: number[] = [];
   const limits = createAnalysisLimits();
   const handler = setup({ limits, now: () => time, sleep: async delay => { sleeps.push(delay); time += delay; }, fetch: async () => {
-    calls++; starts.push(time); return upstreamError(429, 'rate_limit_exceeded');
+    calls++; starts.push(time); return upstreamError(429, 'RATE_LIMIT_EXCEEDED');
   } });
   const response = await handler.POST(request()); const result = await response.json();
   assert.equal(calls, 3); assert.deepEqual(sleeps, [500, 1000]); assert.deepEqual(starts, [1000, 1500, 2500]);
@@ -356,7 +388,7 @@ test('Retry-After seconds and HTTP-date are respected without retrying early', a
   for (const retryAfter of ['2', new Date(4000).toUTCString()]) {
     let time = 1000; let calls = 0; const sleeps: number[] = []; const attempts: number[] = [];
     const handler = setup({ now: () => time, sleep: async delay => { sleeps.push(delay); time += delay; }, fetch: async () => {
-      attempts.push(time); calls++; return calls === 1 ? upstreamError(429, 'rate_limit_exceeded', undefined, { 'Retry-After': retryAfter }) : provider();
+      attempts.push(time); calls++; return calls === 1 ? upstreamError(429, 'RATE_LIMIT_EXCEEDED', undefined, { 'Retry-After': retryAfter }) : provider();
     } });
     assert.equal((await handler.POST(request())).status, 200);
     const expected = retryAfter === '2' ? 2000 : 3000;
@@ -366,7 +398,7 @@ test('Retry-After seconds and HTTP-date are respected without retrying early', a
 
 test('long Retry-After returns its real delay rather than retrying beyond the overall budget', async () => {
   let calls = 0; const sleeps: number[] = [];
-  const handler = setup({ now: () => 1000, fetch: async () => { calls++; return upstreamError(429, 'rate_limit_exceeded', undefined, { 'Retry-After': '60' }); }, sleep: async delay => { sleeps.push(delay); } });
+  const handler = setup({ now: () => 1000, fetch: async () => { calls++; return upstreamError(429, 'RATE_LIMIT_EXCEEDED', undefined, { 'Retry-After': '60' }); }, sleep: async delay => { sleeps.push(delay); } });
   const response = await handler.POST(request()); const result = await response.json();
   assert.equal(calls, 1); assert.deepEqual(sleeps, []); assert.equal(response.status, 429);
   assert.equal(result.retryAfterSeconds, 60); assert.equal(response.headers.get('retry-after'), '60');
@@ -397,7 +429,7 @@ test('per-attempt timeouts may retry within the single overall deadline', async 
 
 test('local quota counts every retry and reports the precise remaining window', async () => {
   let time = 1000; let calls = 0; const limits = createAnalysisLimits(); limits.starts = new Array(9).fill(0);
-  const handler = setup({ limits, now: () => time, fetch: async () => { calls++; return upstreamError(429, 'rate_limit_exceeded'); }, sleep: async delay => { time += delay; } });
+  const handler = setup({ limits, now: () => time, fetch: async () => { calls++; return upstreamError(429, 'RATE_LIMIT_EXCEEDED'); }, sleep: async delay => { time += delay; } });
   const response = await handler.POST(request()); const result = await response.json();
   assert.equal(calls, 1); assert.equal(result.code, 'local_rate_limited'); assert.equal(result.retryAfterSeconds, 59);
   assert.equal(response.headers.get('retry-after'), '59'); assert.equal(limits.starts.length, 10); assert.equal(limits.active, 0);
@@ -405,7 +437,7 @@ test('local quota counts every retry and reports the precise remaining window', 
 
 test('active concurrency slot remains held throughout backoff', async () => {
   const limits = createAnalysisLimits(); let calls = 0; const sleepers: (() => void)[] = [];
-  const handler = setup({ limits, fetch: async () => { calls++; return calls <= 2 ? upstreamError(429, 'rate_limit_exceeded') : provider(); },
+  const handler = setup({ limits, fetch: async () => { calls++; return calls <= 2 ? upstreamError(429, 'RATE_LIMIT_EXCEEDED') : provider(); },
     sleep: () => new Promise<void>(resolve => sleepers.push(resolve)) });
   const first = handler.POST(request()); const second = handler.POST(request());
   while (sleepers.length < 2) await new Promise(resolve => setTimeout(resolve, 1));
@@ -416,7 +448,7 @@ test('active concurrency slot remains held throughout backoff', async () => {
 
 test('safe diagnostics correlate requests without logging user data, keys or provider messages/codes', async () => {
   const entries: unknown[] = []; let calls = 0;
-  const handler = setup({ env: () => ({ OPENAI_API_KEY: 'PRIVATE_SERVER_KEY' }), log: entry => { entries.push(entry); }, fetch: async () => {
+  const handler = setup({ env: () => ({ GEMINI_API_KEY: 'PRIVATE_SERVER_KEY' }), log: entry => { entries.push(entry); }, fetch: async () => {
     calls++; return calls === 1 ? upstreamError(429, 'PRIVATE_UNKNOWN_CODE', undefined, { 'X-Request-Id': 'req_safe123' }) : provider();
   } });
   await handler.POST(request({ mode: 'description', description: 'PRIVATE_USER_DESCRIPTION 150g rice' }));
@@ -424,11 +456,11 @@ test('safe diagnostics correlate requests without logging user data, keys or pro
   for (const forbidden of ['PRIVATE_SERVER_KEY', 'PRIVATE_USER_DESCRIPTION', 'PRIVATE_UNKNOWN_CODE', 'PRIVATE upstream', 'base64', 'per100g']) assert.equal(encoded.includes(forbidden), false);
   assert.equal(entries.length, 2);
   const logs = entries as { requestId: string; mode: string; model: string; code: string; attempt: number; retryDelayMs?: number; providerRequestId?: string }[];
-  assert.equal(logs[0].requestId, logs[1].requestId); assert.equal(logs[0].mode, 'description'); assert.equal(logs[0].model, 'gpt-4.1-mini');
+  assert.equal(logs[0].requestId, logs[1].requestId); assert.equal(logs[0].mode, 'description'); assert.equal(logs[0].model, 'gemini-flash-latest');
   assert.equal(logs[0].code, 'rate_limited'); assert.equal(logs[0].attempt, 1); assert.equal(logs[0].retryDelayMs, 500); assert.equal(logs[0].providerRequestId, 'req_safe123');
   assert.equal(logs[1].code, 'success'); assert.equal(logs[1].attempt, 2);
   const unsafe: unknown[] = [];
-  await setup({ log: entry => unsafe.push(entry), fetch: async () => upstreamError(401, 'invalid_api_key', undefined, { 'X-Request-Id': 'contains spaces private' }) }).POST(request());
+  await setup({ log: entry => unsafe.push(entry), fetch: async () => upstreamError(401, 'API_KEY_INVALID', undefined, { 'X-Request-Id': 'contains spaces private' }) }).POST(request());
   assert.equal(JSON.stringify(unsafe).includes('contains spaces private'), false);
 });
 
@@ -451,7 +483,7 @@ test('authentication and permission statuses never retry broken, hanging, or ove
 });
 
 test('generic HTTP400 schema/input failures are distinct from known unsupported models and images', async () => {
-  for (const [code, expected] of [['invalid_json_schema', 'provider_request_error'], ['unsupported_model', 'model_not_supported'], ['model_not_supported', 'model_not_supported'], ['invalid_image_format', 'invalid_image']]) {
+  for (const [code, expected] of [['INVALID_JSON_SCHEMA', 'provider_request_error'], ['MODEL_NOT_SUPPORTED', 'model_not_supported']]) {
     let calls = 0;
     const handler = setup({ fetch: async () => { calls++; return upstreamError(400, code); } });
     const response = await handler.POST(request()); assert.equal(response.status, 400);
@@ -493,4 +525,85 @@ test('other terminal upstream statuses remain nonretryable when their bodies fai
       assert.equal(result.retryable, false); assert.equal(calls, 1);
     }
   }
+});
+
+test('only GEMINI_API_KEY enables analysis; unrelated or legacy credentials never do', async () => {
+  for (const otherEnvironment of [{ OPENAI_API_KEY: 'legacy-test-placeholder' }, { GOOGLE_API_KEY: 'ambient-test-placeholder' }]) {
+    const handler = setup({ env: () => ({ ...otherEnvironment, GEMINI_API_KEY: undefined }) });
+    assert.deepEqual(await (await handler.GET()).json(), { available: false, provider: 'gemini' });
+    assert.equal((await handler.POST(request())).status, 503);
+    assert.equal(handler.calls(), 0);
+  }
+});
+
+test('native SDK uses the explicit Developer API key and endpoint despite ambient Google settings', async () => {
+  const names = ['GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_ENTERPRISE', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_GEMINI_BASE_URL'];
+  const previous = new Map(names.map(name => [name, process.env[name]]));
+  try {
+    process.env.GOOGLE_API_KEY = 'ambient-test-placeholder'; process.env.GOOGLE_GENAI_USE_ENTERPRISE = 'true'; process.env.GOOGLE_GENAI_USE_VERTEXAI = 'true';
+    process.env.GOOGLE_GEMINI_BASE_URL = 'https://untrusted.invalid';
+    let calls = 0;
+    const handler = setup({ fetch: async (url, init) => {
+      calls++; assert.equal(new URL(String(url)).origin, 'https://generativelanguage.googleapis.com');
+      assert.equal(new Headers(init?.headers).get('x-goog-api-key'), 'test-only-placeholder');
+      assert.equal(new Headers(init?.headers).has('authorization'), false); return provider();
+    } });
+    assert.equal((await handler.POST(request())).status, 200); assert.equal(calls, 1);
+  } finally {
+    for (const [name, value] of previous) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+});
+
+test('SDK boundary disables retries, automatic continuation, function calls and non-Developer API credentials', async () => {
+  let calls = 0;
+  const handler = setup({ generate: async (parameters, options) => {
+    calls++; assert.equal(options.apiKey, 'test-only-placeholder'); assert.equal(options.vertexai, false); assert.equal(options.enterprise, false);
+    assert.equal(options.httpOptions?.retryOptions?.attempts, 1); assert.equal(parameters.config?.httpOptions?.retryOptions?.attempts, 1);
+    assert.equal(parameters.config?.automaticContinuation, false); assert.equal(parameters.config?.automaticFunctionCalling?.disable, true);
+    assert.equal(parameters.config?.responseMimeType, 'application/json'); assert.ok(parameters.config?.responseJsonSchema);
+    assert.ok(parameters.config?.abortSignal instanceof AbortSignal); assert.ok((parameters.config?.httpOptions?.timeout ?? 0) <= 15_000);
+    assert.equal(options.googleAuthOptions, undefined); assert.equal(options.project, undefined); assert.equal(options.location, undefined);
+    return provider().json();
+  } });
+  assert.equal((await handler.POST(request())).status, 200); assert.equal(calls, 1);
+});
+
+test('native SDK does not perform an automatic continuation request', async () => {
+  let calls = 0;
+  const handler = setup({ fetch: async () => { calls++; return Response.json({ candidates: [{ finishReason: 'CONTINUATION', content: { role: 'model', parts: [{ text: '{}' }] } }] }); } });
+  const response = await handler.POST(request()); assert.equal(response.status, 502);
+  assert.equal((await response.json()).code, 'invalid_response'); assert.equal(calls, 1);
+});
+
+test('Gemini prompt blocks and safety refusals never become invented nutrition estimates', async () => {
+  for (const payload of [{ promptFeedback: { blockReason: 'SAFETY' } }, { candidates: [{ finishReason: 'SAFETY', content: { parts: [] } }] }]) {
+    let calls = 0;
+    const response = await setup({ fetch: async () => { calls++; return Response.json(payload); } }).POST(request({ locale: 'ar' }));
+    const result = await response.json(); assert.equal(result.code, 'content_blocked'); assert.equal(result.retryable, false);
+    assert.equal('foods' in result, false); assert.equal(calls, 1); assert.equal(JSON.stringify(result).includes('SAFETY'), false);
+  }
+});
+
+test('Gemini RetryInfo and positive per-minute QuotaFailure are transient and respect retry delay', async () => {
+  let time = 1000; let calls = 0; const sleeps: number[] = []; const attempts: number[] = [];
+  const handler = setup({ now: () => time, sleep: async delay => { sleeps.push(delay); time += delay; }, fetch: async () => {
+    attempts.push(time); calls++;
+    return calls === 1 ? Response.json({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', details: [
+      { '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', quotaValue: '15' }] },
+      { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '2.5s' },
+    ] } }, { status: 429, headers: { 'Retry-After': '2' } }) : provider();
+  } });
+  assert.equal((await handler.POST(request())).status, 200); assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [2500]); assert.deepEqual(attempts, [1000, 3500]);
+});
+
+test('typed SDK ApiError JSON is inspected safely without needing a raw fetch Response', async () => {
+  let calls = 0; const logs: unknown[] = [];
+  const handler = setup({ generate: async () => {
+    calls++; throw new ApiError({ status: 400, message: JSON.stringify({ error: { code: 400, message: 'PRIVATE raw Gemini error with URL and key',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'API_KEY_INVALID' }] } }) });
+  }, log: entry => logs.push(entry) });
+  const response = await handler.POST(request()); const result = await response.json();
+  assert.equal(response.status, 401); assert.equal(result.code, 'authentication_error'); assert.equal(calls, 1);
+  assert.equal(JSON.stringify(result).includes('PRIVATE'), false); assert.equal(JSON.stringify(logs).includes('PRIVATE'), false);
 });
